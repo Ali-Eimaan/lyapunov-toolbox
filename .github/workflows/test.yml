@@ -1,0 +1,147 @@
+name: test
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+# MATLAB is deliberately absent from CI: the toolbox targets YALMIP+Mosek, and
+# neither a MATLAB nor a Mosek licence is available to a public runner. The
+# MATLAB path is validated manually and its output is recorded verbatim in
+# docs/benchmarks.md. See IMPLEMENTATION_GUIDE.md §7.
+
+jobs:
+  julia:
+    name: julia ${{ matrix.julia-version }} (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        julia-version: ["1.10", "1"]
+        os: [ubuntu-latest]
+        include:
+          - julia-version: "1"
+            os: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: julia-actions/setup-julia@v2
+        with:
+          version: ${{ matrix.julia-version }}
+
+      - uses: julia-actions/cache@v2
+
+      - name: Instantiate
+        run: julia --project=julia -e 'using Pkg; Pkg.instantiate()'
+
+      - name: Run tests
+        run: julia --project=julia --color=yes -e 'using Pkg; Pkg.test(coverage=true)'
+
+      - uses: julia-actions/julia-processcoverage@v1
+        if: matrix.julia-version == '1' && matrix.os == 'ubuntu-latest'
+        with:
+          directories: julia/src
+
+      - uses: codecov/codecov-action@v4
+        if: matrix.julia-version == '1' && matrix.os == 'ubuntu-latest'
+        with:
+          files: lcov.info
+          fail_ci_if_error: false
+
+  python:
+    name: pytest (py${{ matrix.python-version }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.10", "3.12"]
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: julia-actions/setup-julia@v2
+        with:
+          version: "1"
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+          cache: pip
+
+      - name: Install package
+        working-directory: python
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e ".[dev]"
+
+      - name: Lint
+        working-directory: python
+        run: ruff check lyapunov_toolbox tests
+
+      - name: Instantiate Julia project used by the bridge
+        run: julia --project=julia -e 'using Pkg; Pkg.instantiate(); Pkg.precompile()'
+
+      # The bridge tests are the point of the Python side: they must actually
+      # cross the language boundary, not mock it. LYAPUNOV_TOOLBOX_JULIA_PROJECT
+      # tells the bridge which project to activate;
+      # LYAPUNOV_TOOLBOX_REQUIRE_JULIA turns a "Julia unavailable" skip into a
+      # collection failure, because a skipped bridge suite in CI is a failed one.
+      - name: Test
+        working-directory: python
+        env:
+          LYAPUNOV_TOOLBOX_JULIA_PROJECT: ${{ github.workspace }}/julia
+          LYAPUNOV_TOOLBOX_REQUIRE_JULIA: "1"
+        run: pytest --cov=lyapunov_toolbox --cov-report=xml --cov-report=term
+
+  examples:
+    name: examples execute
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: julia-actions/setup-julia@v2
+        with:
+          version: "1"
+
+      - uses: julia-actions/cache@v2
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Install
+        run: |
+          julia --project=julia -e 'using Pkg; Pkg.instantiate(); Pkg.precompile()'
+          python -m pip install --upgrade pip
+          pip install -e "python[dev]"
+
+      - name: Run the .jl demos
+        run: |
+          for f in examples/*/*.jl; do
+            echo "::group::$f"
+            julia --project=julia --color=yes "$f"
+            echo "::endgroup::"
+          done
+
+      - name: Execute the notebooks
+        env:
+          LYAPUNOV_TOOLBOX_JULIA_PROJECT: ${{ github.workspace }}/julia
+        run: pytest --nbmake examples/ --nbmake-timeout=1200
+
+  latex:
+    name: derivations compile
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install TeX Live
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            texlive-latex-recommended texlive-latex-extra texlive-science latexmk
+      - name: Compile
+        working-directory: docs/derivations
+        run: |
+          for f in sos_decomposition.tex positivstellensatz.tex; do
+            latexmk -pdf -interaction=nonstopmode -halt-on-error "$f"
+          done

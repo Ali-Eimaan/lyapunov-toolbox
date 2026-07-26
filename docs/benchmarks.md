@@ -1,0 +1,163 @@
+# Benchmarks
+
+**Status: SCHEMA ONLY.** Every table below is empty. Fill it from
+`benchmark_row` output, never by hand. See IMPLEMENTATION_GUIDE.md §10.2.
+
+Nothing in this file may be typed from memory, estimated, or copied from a paper.
+Each number is produced by code in this repository, on hardware named below, and
+is reproducible with the command given next to its table.
+
+---
+
+## Environment
+
+Fill this in before any table. A benchmark without an environment block is not a
+benchmark.
+
+| | |
+|---|---|
+| CPU | |
+| RAM | |
+| OS | |
+| Julia version | |
+| SumOfSquares.jl / JuMP versions | |
+| Conic solver + version | |
+| MATLAB version | |
+| YALMIP release | |
+| Mosek version | |
+| Commit | |
+| Date | |
+
+---
+
+## 1. Certified ROA per system
+
+```bash
+julia --project=julia examples/van_der_pol/van_der_pol_demo.jl
+```
+
+| System | `n` | `deg V` | `deg λ` | `ε` | `ρ` | Certified volume | Fraction of true ROA | Largest Gram block | SDPs | Total solve time |
+|---|---|---|---|---|---|---|---|---|---|---|
+| Van der Pol (reversed) | 2 | 2 | | | | | | | | |
+| Van der Pol (reversed) | 2 | 4 | | | | | | | | |
+| Van der Pol (reversed) | 2 | 6 | | | | | | | | |
+| Inverted pendulum (Taylor-3) | 2 | 4 | | | | | | | | |
+| Inverted pendulum (trig recast) | 3 | 4 | | | | | | | | |
+| Unicycle + obstacle | 4 | 4 | | | | | | | | |
+| 3-agent consensus | 2 | 2 | | | | | | | | |
+| 3-agent consensus | 2 | 4 | | | | | | | | |
+
+**"Fraction of true ROA"** is against the empirical boundary from
+`true_roa_boundary_2d`, except for Van der Pol where the exact limit cycle is
+used. Say which, per row, in a footnote — the two are not the same kind of number
+and combining them in one column without saying so would be misleading.
+
+For `n > 2` the fraction is computed on a stated 2-D slice. Give the slice.
+
+---
+
+## 2. Cost versus degree
+
+The growth of the SDP is the dominant practical fact about SOS methods, and this
+table is the honest version of "it scales poorly".
+
+| `n` | `deg V` | Gram dimension | Free variables | Solve time (s) | Peak memory |
+|---|---|---|---|---|---|
+| 2 | 2 | | | | |
+| 2 | 4 | | | | |
+| 2 | 6 | | | | |
+| 2 | 8 | | | | |
+| 3 | 4 | | | | |
+| 4 | 4 | | | | |
+| 6 | 4 | | | | |
+
+Include the first configuration that failed — ran out of memory, exceeded ten
+minutes, or returned a status other than `OPTIMAL`. Record which, and what the
+solver said. The failure row is the most informative line in the table.
+
+---
+
+## 3. Solver comparison
+
+Same problem, same formulation, different conic solver.
+
+| Solver | `ρ` | Solve time (s) | Status | Max Gram residual | Min Gram eigenvalue |
+|---|---|---|---|---|---|
+| Clarabel | | | | | |
+| SCS | | | | | |
+| Mosek (via MATLAB) | | | | | |
+| SeDuMi (via MATLAB) | | | | | |
+
+The `ρ` column must agree across solvers to the bisection tolerance. If it does
+not, the formulation is ill-conditioned and that is the finding — report it, do
+not pick the best row.
+
+---
+
+## 4. Julia vs. MATLAB cross-validation
+
+Two independent implementations, two modelling layers, two solvers, no shared
+code. Agreement is evidence; disagreement is a bug in one of them.
+
+| System | Julia `ρ` | MATLAB `ρ` | Relative difference | Max `V` coefficient difference |
+|---|---|---|---|---|
+| Van der Pol (reversed), `deg V = 2` | | | | |
+| Inverted pendulum (Taylor-3), `deg V = 2` | | | | |
+
+Required agreement: `1e-3` relative on `ρ`. Regenerate the fixture with
+
+```matlab
+van_der_pol_roa('WriteFixture', true)
+```
+
+and commit `tests/fixtures/matlab_vdp.csv` together with the MATLAB, YALMIP, and
+Mosek versions in the commit message. CI cannot regenerate this — it has neither
+a MATLAB nor a Mosek licence — so the provenance in the commit message is the
+only record there is.
+
+---
+
+## 5. Bridge overhead
+
+| Operation | Time (ms) |
+|---|---|
+| First `import lyapunov_toolbox` | |
+| First bridge call (Julia startup + precompile) | |
+| Subsequent `certify_roa` (2-state, `deg V = 2`) | |
+| `RoaCertificate.evaluate` on 10⁶ points (NumPy, no Julia) | |
+| Certificate marshalling | |
+
+The last two rows justify a design decision — evaluation in NumPy off a
+marshalled certificate rather than through the bridge — so they need to be
+measured rather than asserted.
+
+---
+
+## 6. Reproduction
+
+```bash
+julia --project=julia -e 'using Pkg; Pkg.instantiate()'
+for f in examples/*/*.jl; do julia --project=julia "$f"; done
+pytest --nbmake examples/
+```
+
+MATLAB rows:
+
+```matlab
+addpath('matlab'); van_der_pol_roa('WriteFixture', true); pendulum_roa
+```
+
+---
+
+## 7. Caveats
+
+Write these out rather than leaving them implied:
+
+- Solve times are single-run on a laptop under an unspecified thermal state.
+  Report the median of five runs and say so, or report a single run and say that.
+- "Fraction of true ROA" uses an empirical boundary for every system except Van
+  der Pol. It is an estimate at a stated horizon and grid, not a proof.
+- Every certified set is an **inner** approximation. None of these numbers is the
+  region of attraction; each is a set that provably lies inside it.
+- The V–s iteration is a local heuristic. A larger number in this table means a
+  better run, not a better system.

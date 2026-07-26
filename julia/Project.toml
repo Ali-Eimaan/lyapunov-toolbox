@@ -1,0 +1,42 @@
+name = "LyapunovToolbox"
+uuid = "3f9d1c7a-6b2e-4d58-9a41-0c7e5b8f2d10"
+authors = ["Ali-Eimaan"]
+version = "0.1.0"
+
+# NOTE(impl): every UUID below must match the General registry exactly or
+# `Pkg.instantiate()` fails with a confusing "expected package X to be
+# registered" error. Do NOT hand-edit them. If instantiate complains, delete the
+# offending line and re-add the package with
+#   julia --project=julia -e 'using Pkg; Pkg.add("PackageName")'
+# which writes the authoritative UUID. See IMPLEMENTATION_GUIDE.md §2 Phase 0.
+
+[deps]
+DynamicPolynomials = "7c1d4256-1411-5781-91ec-d7bc3513ac07"
+JuMP = "4076af6c-e467-56ae-b986-b466b2749572"
+LinearAlgebra = "37e2e46d-f89d-539d-b4ee-838fcccc9c8e"
+MultivariatePolynomials = "102ac46a-7ee4-5c85-9060-abc95bfdeaa3"
+Printf = "de0858da-6303-5e67-8744-51eddeeeb8d7"
+Random = "9a3f8284-a2c9-5f02-9a11-845980a1fd5c"
+SemialgebraicSets = "8e049039-38e9-557d-ae3a-bc521ccf6204"
+SumOfSquares = "4b9e565b-77fc-50a5-a571-1244f986bda1"
+
+# TODO(impl): add the conic solver in Phase 0 with
+#   Pkg.add("Clarabel")   # preferred: pure Julia, MIT, no binary dependency
+#   Pkg.add("SCS")        # fallback, used only if Clarabel stalls
+# and add "Clarabel" / "SCS" to [extras] + "test" targets below.
+# Mosek is NOT a dependency of the Julia side — it lives in matlab/ only.
+
+[compat]
+DynamicPolynomials = "0.5, 0.6"
+JuMP = "1"
+MultivariatePolynomials = "0.5"
+SemialgebraicSets = "0.2, 0.3"
+SumOfSquares = "0.7"
+julia = "1.10"
+
+[extras]
+DelimitedFiles = "8bb1440f-4735-579b-a4ab-409b98df4dab"
+Test = "8dfed614-e22c-5e08-85e1-65c5234f0b40"
+
+[targets]
+test = ["Test", "DelimitedFiles"]

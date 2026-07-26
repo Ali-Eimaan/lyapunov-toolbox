@@ -1,0 +1,164 @@
+% positivstellensatz.tex — Putinar's Positivstellensatz and the constrained
+% Lyapunov certificate built on it.
+%
+% THIS IS THE FLAGSHIP DOCUMENT of the repository. It is the result cited in the
+% TVF paper, and it is the one an advisor at a theory-heavy lab will actually
+% read. Budget accordingly: it should be the longest and most careful of the two
+% derivations, and Section 5 (the ROA theorem as this repository states it) must
+% be airtight.
+%
+% Depends on sos_decomposition.tex for the Gram parameterisation. Cite it; do not
+% restate it.
+%
+% Compile:  latexmk -pdf positivstellensatz.tex   (from docs/derivations/)
+
+\documentclass[11pt]{article}
+\input{preamble}
+
+\title{Putinar's Positivstellensatz and Certified Regions of Attraction}
+\author{Ali-Eimaan}
+\date{}
+
+\begin{document}
+\maketitle
+
+\begin{abstract}
+% TODO(impl): one paragraph. The S-procedure used throughout this toolbox is an
+% instance of Putinar's Positivstellensatz; this note states the theorem with its
+% hypotheses, derives the region-of-attraction program from it, and is explicit
+% about which implications are one-way.
+\end{abstract}
+
+\section{Semialgebraic sets and quadratic modules}
+% TODO(impl):
+%  - K = {x : g_1(x) >= 0, ..., g_m(x) >= 0}, the basic closed semialgebraic set;
+%  - the quadratic module M(g) = { sigma_0 + sum sigma_j g_j : sigma_j in Sigma[x] };
+%  - the preordering, and one sentence on why the quadratic module (linear in the
+%    generators) is what gets used and the preordering (all 2^m products) does not.
+
+\section{The Archimedean condition}
+\begin{definition}[Archimedean]
+% TODO(impl): M(g) is Archimedean if N - ||x||^2 is in M(g) for some N.
+\end{definition}
+% TODO(impl):
+%  - it implies K compact, but is strictly stronger than compactness --- give the
+%    standard example distinguishing them, or state plainly that the distinction
+%    is representation-dependent and give the fix;
+%  - THE PRACTICAL POINT: adding the redundant ball constraint N - ||x||^2 >= 0
+%    to the description of a compact K makes the module Archimedean without
+%    changing K. Say that the code does this, name where, and give the N used
+%    for the unicycle example.
+% A reader who has implemented SOS will look specifically for whether this
+% subtlety is handled or ignored.
+
+\section{Putinar's Positivstellensatz}
+\begin{theorem}[Putinar, 1993]
+% TODO(impl): if M(g) is Archimedean and p > 0 on K, then p is in M(g), i.e.
+%   p = sigma_0 + sum_j sigma_j g_j  with all sigma_j SOS.
+\end{theorem}
+% TODO(impl): do NOT prove this. State it, cite it, and say explicitly that it is
+% quoted rather than proved. Then spend the space on what actually needs saying:
+%  - strict positivity is required; p >= 0 on K is not enough, and the toolbox's
+%    epsilon margin is precisely how the code buys strictness;
+%  - the theorem gives NO degree bound on the sigma_j. This is the whole reason
+%    the implementation fixes a degree and reports infeasibility rather than
+%    searching --- and the reason an infeasible result proves nothing.
+% Handle both of those honestly and the section is doing its job.
+
+\section{The S-procedure as a special case}
+% TODO(impl): specialise to m = 1 with g = rho - V. Recover
+%   -(Vdot + eps ||x||^2) + lambda (V - rho)  in Sigma[x],  lambda in Sigma[x],
+% which is exactly the program in \codelink{verify_sublevel_set}{julia/src/sos_lyapunov.jl}.
+% Note that the classical S-procedure (one quadratic constraint, quadratic forms)
+% is LOSSLESS, whereas this polynomial generalisation is not, and say where the
+% lossless case ends.
+
+\section{The certified region of attraction}
+\begin{assumption}
+% TODO(impl): f polynomial, f(0) = 0, A = df/dx(0) Hurwitz. V polynomial,
+% V(0) = 0, V - eps||x||^2 SOS.
+\end{assumption}
+
+\begin{theorem}[Certified inner approximation]
+% TODO(impl): under the assumption, if
+%   (i)  Omega_rho = {x : V(x) <= rho} is BOUNDED, and
+%   (ii) there exists lambda in Sigma[x] with
+%        -(Vdot + eps||x||^2) + lambda(V - rho) in Sigma[x],
+% then Omega_rho is positively invariant and Omega_rho is contained in the region
+% of attraction of the origin.
+\end{theorem}
+\begin{proof}
+% TODO(impl): four steps, all short.
+%  1. On Omega_rho, lambda(V - rho) <= 0, so the SOS condition gives
+%     Vdot <= -eps||x||^2 < 0 for x != 0.
+%  2. Invariance: V is non-increasing along trajectories, so a trajectory
+%     starting in Omega_rho cannot cross the level set. Note where continuity of
+%     the flow is used.
+%  3. Boundedness + closedness => compactness => the trajectory is defined for
+%     all t >= 0 and has a nonempty omega-limit set in Omega_rho.
+%  4. LaSalle, or directly: Vdot <= -eps||x||^2 forces the limit set to be {0}.
+%
+% CALL OUT hypothesis (i) EXPLICITLY IN THE PROOF, at the step that uses it.
+% It is the hypothesis most often dropped in applied write-ups, and the proof is
+% simply false without it. \codelink{is_sublevel_set_bounded}{julia/src/polynomial_utils.jl}
+% is what checks it, and this is the sentence that explains why that function exists.
+\end{proof}
+
+\begin{remark}[Equality constraints]
+% TODO(impl): for a recast invariant h(x) = 0 (from the trigonometric recasting),
+% the multiplier mu is FREE-SIGN, not SOS, because mu*h vanishes on the set
+% regardless of sign. Using an SOS multiplier is valid but strictly weaker. Give
+% the one-line argument and cite the test in tests/test_sos_lyapunov.jl that
+% measures the difference.
+\end{remark}
+
+\section{The V--s iteration}
+% TODO(impl):
+%  - write the three steps as programs;
+%  - identify each bilinearity precisely: (lambda, rho) in the gamma-step,
+%    (sigma_beta, beta) in the beta-step, (V, lambda) across steps;
+%  - justify the bisection by the monotonicity of feasibility in rho --- one line,
+%    and the method is unmotivated without it;
+%  - the rho = 1 normalisation and the scaling degeneracy V -> V/rho it removes;
+%  - state that the iteration is monotone in beta but has NO convergence
+%    guarantee to a global optimum, and that different seeds give different fixed
+%    points. Report the spread you observed across seeds --- a measured spread is
+%    a much stronger statement than "no guarantee".
+
+\section{What the certificate does not say}
+% TODO(impl): the section that earns trust. Be specific:
+%  - it is an INNER approximation. Nothing here bounds the true ROA from outside;
+%  - infeasibility proves nothing about the system, only about this degree, this
+%    basis, this multiplier structure;
+%  - it is a floating-point certificate (cross-reference sos_decomposition.tex
+%    Section 7);
+%  - for a Taylor-recast model it is a statement about the truncated field. Point
+%    at the pendulum example, which measures the gap rather than assuming it away;
+%  - no robustness: additive disturbance or parameter mismatch invalidates it.
+%    Name what would be needed (a robust or common Lyapunov formulation) without
+%    claiming to have done it.
+
+\section{Forward reference: transition-viable funnels}
+% TODO(impl): one page, and the reason this document is the flagship.
+%  - a transition-viable funnel for a hybrid system needs, per mode, an invariant
+%    set contained in the ROA of that mode --- exactly the object certified above;
+%  - the composition requirement across a discrete transition: the reachable set
+%    under the reset map must land inside the NEXT mode's certified set. Write
+%    that condition down formally. It is the central object of the thesis and
+%    writing it precisely here is the strongest possible signal that the
+%    portfolio and the research proposal are one project rather than two;
+%  - what breaks with a SET-VALUED reset: the condition becomes a containment of
+%    an image set, and a sufficient SOS condition for it needs a multiplier on
+%    the reset relation. Sketch it, state the open piece;
+%  - the counterexample in examples/multi_agent_consensus/ shows per-mode
+%    certificates failing under adversarial switching. Reference it by figure and
+%    quote the number.
+
+\begin{thebibliography}{9}
+% TODO(impl): Putinar (1993); Schmuedgen (1991); Parrilo (2000);
+% Jarvis-Wloszek et al. (2003); Topcu, Packard, Seiler (2008);
+% Khalil, Nonlinear Systems 3rd ed., Thm 4.1; Lasserre (2001);
+% Henrion & Korda (2014) on occupation-measure outer approximations.
+\end{thebibliography}
+
+\end{document}

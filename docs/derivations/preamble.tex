@@ -1,0 +1,66 @@
+% preamble.tex — shared macros for the derivations.
+%
+% Both derivation files are standalone-compilable via \input{preamble}. Compile
+% from inside docs/derivations/ so the relative \input resolves:
+%
+%   latexmk -pdf sos_decomposition.tex
+%
+% Notation here must match docs/theory_notes.md §1 and the code identifiers.
+% If they drift, the cross-references in the notebooks stop meaning anything.
+
+\usepackage[utf8]{inputenc}
+\usepackage[T1]{fontenc}
+\usepackage{amsmath, amssymb, amsthm}
+\usepackage{mathtools}
+\usepackage{bm}
+\usepackage{graphicx}
+\usepackage{booktabs}
+\usepackage[margin=1in]{geometry}
+\usepackage[colorlinks=true, linkcolor=blue, citecolor=blue]{hyperref}
+\usepackage{cleveref}   % requires two pdflatex passes
+
+\theoremstyle{plain}
+\newtheorem{theorem}{Theorem}
+\newtheorem{lemma}[theorem]{Lemma}
+\newtheorem{proposition}[theorem]{Proposition}
+\newtheorem{corollary}[theorem]{Corollary}
+
+\theoremstyle{definition}
+\newtheorem{definition}[theorem]{Definition}
+\newtheorem{example}[theorem]{Example}
+\newtheorem{assumption}[theorem]{Assumption}
+
+\theoremstyle{remark}
+\newtheorem{remark}[theorem]{Remark}
+
+% --- sets and cones ----------------------------------------------------------
+\newcommand{\R}{\mathbb{R}}
+\newcommand{\N}{\mathbb{N}}
+\newcommand{\Sym}{\mathbb{S}}                      % symmetric matrices
+\newcommand{\PSD}{\succeq 0}
+\newcommand{\SOS}{\Sigma}                          % the SOS cone, \SOS[x]
+\newcommand{\Rx}{\R[x]}                            % polynomial ring
+\newcommand{\Mset}{\mathcal{M}}                    % quadratic module
+
+% --- the objects of the certificate ------------------------------------------
+\newcommand{\Vdot}{\dot{V}}
+\newcommand{\Lie}[2]{\nabla #1 \cdot #2}           % \Lie{V}{f}
+\newcommand{\sublevel}[2]{\Omega_{#2}}             % \sublevel{V}{\rho}
+\newcommand{\ROA}{\mathcal{R}}                     % region of attraction
+\newcommand{\gram}{Q}
+\newcommand{\basis}{z}
+
+% --- operators ---------------------------------------------------------------
+\DeclareMathOperator{\tr}{tr}
+\DeclareMathOperator{\rank}{rank}
+\DeclareMathOperator{\diag}{diag}
+\DeclareMathOperator{\deg}{deg}
+\DeclareMathOperator*{\argmax}{arg\,max}
+\DeclareMathOperator*{\argmin}{arg\,min}
+
+% --- a macro for pointing prose at the implementation -------------------------
+% Use \codelink{lie_derivative}{julia/src/polynomial_utils.jl} in the text every
+% time a symbol first appears. A derivation that names the function implementing
+% it is checkable; one that does not is a separate document that happens to sit
+% in the same repository.
+\newcommand{\codelink}[2]{\texttt{#1} (\texttt{#2})}

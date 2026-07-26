@@ -1,0 +1,124 @@
+% sos_decomposition.tex — Parrilo's SOS decomposition, in this repository's
+% notation, with one fully worked example.
+%
+% Audience: an advisor skimming the GitHub profile who wants to know in ninety
+% seconds whether the author understands SOS or has only called a library. Write
+% for that reader. The worked example in Section 4 is what answers the question;
+% everything else is setup.
+%
+% Compile:  latexmk -pdf sos_decomposition.tex   (from docs/derivations/)
+
+\documentclass[11pt]{article}
+\input{preamble}
+
+\title{Sum-of-Squares Decomposition and the Gram Matrix Parameterisation}
+\author{Ali-Eimaan}
+\date{}
+
+\begin{document}
+\maketitle
+
+\begin{abstract}
+% TODO(impl): one paragraph. Checking global nonnegativity of a polynomial is
+% NP-hard; checking membership in the SOS cone is a semidefinite program. State
+% the trade --- tractability bought at the price of a sufficient-only condition ---
+% and say that this document derives the parameterisation and works one example
+% end to end, by hand, against the output of \codelink{sos_decomposition}{julia/src/sos_lyapunov.jl}.
+\end{abstract}
+
+\section{Setting}
+% TODO(impl):
+%  - polynomial ring R[x], total degree, the cone of nonnegative polynomials P_{n,2d};
+%  - the SOS cone Sigma[x] and its definition;
+%  - Sigma subseteq P, with equality only in Hilbert's three cases (n=1;
+%    2d=2; n=2, 2d=4). State the classification precisely --- getting it slightly
+%    wrong is a tell, and it is easy to state correctly.
+
+\section{The Gram matrix parameterisation}
+\begin{proposition}[Gram representation]
+% TODO(impl): p of degree 2d is SOS iff there exists Q psd with p = z(x)' Q z(x),
+% where z(x) is the vector of monomials of degree at most d.
+\end{proposition}
+\begin{proof}
+% TODO(impl): both directions.
+%  (<=) Cholesky Q = L L' gives p = sum_i (L' z)_i^2 explicitly. Write the
+%       explicit squares --- this is the direction that produces the certificate
+%       and the one the code uses.
+%  (=>) Every square in a representation of p has degree at most d, so each is a
+%       linear combination of z; collect the coefficient vectors into L.
+%       Say why "degree at most d" holds --- it is the Newton polytope argument
+%       and it is worth one honest sentence rather than being asserted.
+\end{proof}
+
+\begin{remark}[Why this is an SDP]
+% TODO(impl): the map Q -> coefficients of z'Qz is linear, so matching
+% coefficients with p gives affine equality constraints on Q. Combined with
+% Q psd the feasible set is a spectrahedron. Count: Q is N x N with
+% N = binom(n+d, d), and there are binom(n+2d, 2d) coefficient equalities, so
+% the representation is non-unique whenever N(N+1)/2 exceeds that count. That
+% non-uniqueness is exactly the freedom the SDP searches over --- make this point,
+% it is the one that turns the parameterisation from a fact into a method.
+\end{remark}
+
+\section{Newton polytope reduction}
+% TODO(impl): the monomial basis can be restricted to lattice points in half the
+% Newton polytope of p (Reznick). State it, give the two-line reason, and report
+% the actual size reduction it achieves on the degree-6 Van der Pol Lyapunov
+% candidate --- a number from gram_dimension, not an estimate.
+% If the implementation does not exploit this, say so here.
+
+\section{A fully worked example}
+% TODO(impl): THE SECTION THAT MATTERS. Take a specific quartic in two
+% variables, small enough to do entirely by hand, and:
+%   1. write z(x) = [1, x1, x2, x1^2, x1 x2, x2^2]';
+%   2. write the coefficient-matching equations explicitly, including the
+%      free parameter(s) that make Q non-unique;
+%   3. exhibit one psd choice of Q;
+%   4. take its Cholesky factor and write out the explicit sum of squares;
+%   5. verify by expanding, by hand, back to p.
+%
+% Then print the Q that julia/src/sos_lyapunov.jl returns for the same p and
+% compare. It will differ --- the SDP picks an interior point, not your choice ---
+% and explaining WHY the two differ while both being valid is a better
+% demonstration of understanding than either matrix alone.
+%
+% Suggested p: something whose hand-decomposition is not the obvious one, so the
+% free parameter is genuinely visible. Do not pick a perfect square.
+
+\section{Nonnegative but not SOS}
+% TODO(impl): the Motzkin polynomial
+%   M(x,y,z) = x^2 y^4 + x^4 y^2 - 3 x^2 y^2 z^2 + z^6.
+%  - prove nonnegativity by AM--GM on the three terms;
+%  - show it is not SOS. The standard argument: assume M = sum q_i^2, use the
+%    Newton polytope to restrict which monomials can appear in the q_i, and
+%    derive a contradiction from the coefficient of x^2 y^2 z^2. Write it out;
+%    it is short and it is the only place in this document where something is
+%    proved to be impossible rather than possible.
+%  - report that \codelink{is_sos}{julia/src/sos_lyapunov.jl} returns false for it
+%    and name the test that asserts so.
+
+\section{Numerical reality}
+% TODO(impl):
+%  - the solver returns a floating-point Q; the SOS identity holds to residual,
+%    not exactly. Give the residual actually observed, from gram_residual.
+%  - conditioning of the monomial basis at high degree, with a measured condition
+%    number rather than an adjective;
+%  - eigenvalue clipping: what the code does, at what threshold, and what it
+%    refuses to do (clip a genuinely negative eigenvalue and call it psd);
+%  - rational rounding to obtain an exact certificate --- cite the approach, state
+%    clearly that it is NOT implemented here. An honest omission is stronger than
+%    an implied capability.
+
+\section{What this buys and what it does not}
+% TODO(impl): short and blunt.
+%  - SOS feasible => nonnegative: a proof, modulo the numerical caveats above.
+%  - SOS infeasible => nothing. Not "no certificate exists": no certificate exists
+%    AT THIS DEGREE, in THIS basis, for THIS multiplier structure.
+% This section is three sentences and it is why a reader will trust the rest.
+
+\begin{thebibliography}{9}
+% TODO(impl): Parrilo (2000); Reznick (1978) on Newton polytopes; Motzkin (1967);
+% Blekherman--Parrilo--Thomas (2013); Powers--Wormann on rational certificates.
+\end{thebibliography}
+
+\end{document}

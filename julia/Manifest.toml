@@ -1,0 +1,14 @@
+# This manifest is intentionally empty in the skeleton.
+#
+# A hand-written manifest is worse than no manifest: it pins versions that were
+# never resolved together and produces "package X is not downloaded" failures
+# that look like registry corruption. Generate the real one in Phase 0:
+#
+#   julia --project=julia -e 'using Pkg; Pkg.resolve(); Pkg.instantiate()'
+#
+# then commit the file it writes. From that point on the manifest is a real
+# artifact and must stay in version control -- CI reproducibility (and the
+# "at commit abc123" citation hook in the thesis) depends on it.
+#
+# Pkg treats a comment-only file as an empty manifest and re-resolves from
+# Project.toml, so leaving this as-is is safe but unpinned.
