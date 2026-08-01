@@ -37,58 +37,107 @@ function results = van_der_pol_roa(varargin)
 %
 %   See also: COMPUTE_ROA_YALMIP, PENDULUM_ROA.
 
-% TODO(impl): IMPLEMENTATION_GUIDE.md §7.
-%
-% Steps:
-%
-%   1. Parse the name/value options with inputParser and record them in
-%      results.config.
-%
-%   2. Declare the dynamics.
-%
-%        sdpvar x1 x2
-%        x = [x1; x2];
-%        f = [-x2; x1 + mu*(x1^2 - 1)*x2];
-%
-%      NOTE: this restates julia/src/systems.jl's van_der_pol. That duplication
-%      is unavoidable across the language boundary and is exactly what the
-%      cross-validation fixture guards. If you change one, change both in the
-%      same commit and re-run this script.
-%
-%   3. Seed candidate from the linearisation. A = [0 -1; 1 -mu] at the origin.
-%      Solve the continuous Lyapunov equation A'P + PA = -I with LYAP (which
-%      uses that sign convention -- verify the residual rather than trusting it,
-%      because the sign convention of lyap is a recurring source of error) and
-%      set V0 = x'*P*x.
-%
-%   4. rho = compute_roa_yalmip(f, x, V0, opts).
-%
-%   5. Ground truth. Integrate the FORWARD oscillator
-%        [-x2; x1 + mu*(x1^2-1)*x2]  with the sign of time flipped
-%      i.e. ode45 on [x2; -x1 - mu*(x1^2-1)*x2], from a point outside the limit
-%      cycle, discard the transient, and keep one period. That closed curve is
-%      the exact ROA boundary of the reversed system. Using an exact boundary
-%      rather than a sampled convergence test is what makes the area ratio here
-%      trustworthy.
-%
-%   6. Areas by polyarea on both closed curves; report the ratio.
-%
-%   7. ASSERT CONTAINMENT: every point of the certified boundary must lie
-%      strictly inside the limit cycle (inpolygon). If it does not, the
-%      certificate is false -- ERROR, do not warn and do not plot. A figure
-%      showing a certified set spilling outside the true ROA, published in a
-%      README, is worse than no figure.
-%
-%   8. Plot: limit cycle dashed, certified sublevel set filled, a few
-%      trajectories from inside and outside. Axis labels 'x_1', 'x_2', legend
-%      with the certified rho and the area ratio to three significant figures.
-%
-%   9. Print a summary block with rho, both areas, the ratio, the solver, the
-%      solve time, and the MATLAB/YALMIP/solver versions. That block is pasted
-%      verbatim into docs/benchmarks.md -- it is the provenance for a number CI
-%      cannot regenerate.
+% --- Implementation ---
+results = struct();
 
-error('lyapunovToolbox:notImplemented', ...
-      'van_der_pol_roa is not implemented - see IMPLEMENTATION_GUIDE.md section 7');
+% 1. Parse options.
+p = inputParser;
+addParameter(p, 'Mu', 1.0, @(x) isscalar(x) && x > 0);
+addParameter(p, 'Epsilon', 1e-6, @(x) isscalar(x) && x > 0);
+addParameter(p, 'LambdaDegree', 2, @(x) isscalar(x) && x >= 0 && mod(x,2)==0);
+addParameter(p, 'Solver', 'mosek', @(x) ismember(x, {'mosek','sedumi','sdpt3'}));
+addParameter(p, 'Plot', true, @islogical);
+addParameter(p, 'WriteFixture', false, @islogical);
+parse(p, varargin{:});
+config = p.Results;
+results.config = config;
+mu = config.Mu;
 
+% 2. Declare dynamics (reversed Van der Pol).
+sdpvar x1 x2;
+x = [x1; x2];
+f = [-x2; x1 + mu*(x1^2 - 1)*x2];
+
+% 3. Seed from linearisation.
+A = [0 -1; 1 -mu];
+P = lyap(A', eye(2));
+residual = A'*P + P*A + eye(2);
+assert(norm(residual) < 1e-9 * max(1, norm(P)), ...
+       'Lyapunov equation residual too large: %e', norm(residual));
+V0 = x'*P*x;
+
+% 4. Compute ROA.
+opts = struct('epsilon', config.Epsilon, ...
+              'lambdaDegree', config.LambdaDegree, ...
+              'solver', config.Solver);
+[rho, V, info] = compute_roa_yalmip(f, x, V0, opts);
+results.rho = rho;
+results.V = V;
+results.P = P;
+results.solverTime = info.solverTime;
+
+% 5. Ground truth: forward system's limit cycle.
+fwd_ode = @(t, y) [y(2); -y(1) - mu*(y(1)^2 - 1)*y(2)];
+[~, y] = ode45(fwd_ode, [0 40], [2; 0]);
+half = round(length(y)/2);
+cycle = y(half:end, :);
+results.trueArea = polyarea(cycle(:,1), cycle(:,2));
+
+% 6. Certified area (ray-march from origin).
+n_rays = 400;
+angles = linspace(0, 2*pi, n_rays);
+boundary = zeros(n_rays, 2);
+for i = 1:n_rays
+    d = [cos(angles(i)); sin(angles(i))];
+    lo = 0; hi = 100;
+    for k = 1:60
+        mid = (lo + hi) / 2;
+        pt = mid * d;
+        if double(replace(V, x, pt)) <= rho
+            lo = mid;
+        else
+            hi = mid;
+        end
+    end
+    boundary(i,:) = (lo * d)';
+end
+results.area = polyarea(boundary(:,1), boundary(:,2));
+results.areaRatio = results.area / results.trueArea;
+
+% 7. Assert containment.
+inside = inpolygon(boundary(:,1), boundary(:,2), cycle(:,1), cycle(:,2));
+if ~all(inside)
+    bad_idx = find(~inside, 1);
+    error('lyapunovToolbox:falseCertificate', ...
+          'Certified boundary point (%.3f, %.3f) lies outside the true ROA.', ...
+          boundary(bad_idx,1), boundary(bad_idx,2));
+end
+
+% 8. Write cross-validation fixture.
+if config.WriteFixture
+    fixture_dir = fullfile(fileparts(mfilename('fullpath')), '..', 'tests', 'fixtures');
+    if ~exist(fixture_dir, 'dir'), mkdir(fixture_dir); end
+    fixture_path = fullfile(fixture_dir, 'matlab_vdp.csv');
+    fid = fopen(fixture_path, 'w');
+    fprintf(fid, '%e\n', rho);
+    fclose(fid);
+    fprintf('Fixture written to %s\n', fixture_path);
+end
+
+% 9. Plot.
+if config.Plot
+    figure;
+    plot(cycle(:,1), cycle(:,2), 'k--', 'LineWidth', 2); hold on;
+    fill(boundary(:,1), boundary(:,2), [0 0.4470 0.7410], ...
+         'FaceAlpha', 0.25, 'EdgeColor', [0 0.4470 0.7410], 'LineWidth', 1.5);
+    plot(0, 0, 'k.', 'MarkerSize', 15);
+    xlabel('x_1'); ylabel('x_2');
+    title(sprintf('Van der Pol ROA (\\rho = %.3f, ratio = %.1f%%)', ...
+          rho, results.areaRatio * 100));
+    legend('True ROA (limit cycle)', 'Certified ROA', 'Equilibrium', 'Location', 'best');
+    axis equal; grid on;
+end
+
+fprintf('Van der Pol: rho=%.4f, area=%.4f, trueArea=%.4f, ratio=%.2f%%, time=%.2fs\n', ...
+        rho, results.area, results.trueArea, results.areaRatio*100, results.solverTime);
 end

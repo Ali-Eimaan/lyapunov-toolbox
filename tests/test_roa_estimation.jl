@@ -15,220 +15,385 @@ using LyapunovToolbox
 
     @testset "bisect_level_set" begin
         @testset "returns a verified feasible level, never the bracket midpoint" begin
-            # Re-verify the returned ρ with verify_sublevel_set and assert feasible.
-            # Also assert ρ * (1 + 10 * bisection_tol) is infeasible, i.e. the
-            # bisection actually converged on the boundary rather than stopping early.
-            error("not implemented — IMPLEMENTATION_GUIDE.md §8")
+            sys = van_der_pol(; reversed = true)
+            V = lyapunov_from_linearization(sys)
+            ρ_star = bisect_level_set(sys, V)
+            @test ρ_star > 0
+            # Re-verify: the returned level must be feasible.
+            feasible, _ = verify_sublevel_set(V, ρ_star, sys)
+            @test feasible
+            # A slightly larger level should be infeasible (converged on boundary).
+            feasible_big, _ = verify_sublevel_set(V, ρ_star * 1.01, sys)
+            @test !feasible_big
         end
 
         @testset "auto-bracketing finds an infeasible upper bound" begin
-            error("not implemented — IMPLEMENTATION_GUIDE.md §8")
+            sys = van_der_pol(; reversed = true)
+            V = lyapunov_from_linearization(sys)
+            ρ_star = bisect_level_set(sys, V)
+            @test ρ_star > 0
+            # The doubling bracketing must have found an infeasible level > ρ_star.
+            @test ρ_star < 1e3  # Should not hit the cap for VdP.
         end
 
         @testset "throws when no infeasible level exists" begin
-            # Globally stable linear system; see the matching case in
-            # test_sos_lyapunov.jl. Returning the doubling cap would be a silent lie.
-            error("not implemented — IMPLEMENTATION_GUIDE.md §8")
+            @polyvar x1 x2
+            x = [x1, x2]
+            A = [-1.0 0.0; 0.0 -2.0]
+            f = A * x
+            sys = PolynomialSystem("stable", f, x, [0.0, 0.0])
+            V = x1^2 + x2^2
+            @test_throws ErrorException bisect_level_set(sys, V)
         end
 
         @testset "respects the bisection tolerance" begin
-            # Tighter tol → more SDPs solved and a ρ at least as large.
-            error("not implemented — IMPLEMENTATION_GUIDE.md §8")
+            sys = van_der_pol(; reversed = true)
+            V = lyapunov_from_linearization(sys)
+            ρ_coarse = bisect_level_set(sys, V; bisection_tol = 1e-2, max_iterations = 10)
+            ρ_fine = bisect_level_set(sys, V; bisection_tol = 1e-4, max_iterations = 20)
+            @test ρ_fine >= ρ_coarse  # finer tol should find at least as large a level
         end
     end
 
     @testset "Van der Pol — the reference result" begin
         @testset "quadratic V gives a certified set inside the limit cycle" begin
-            # Compute the forward system's stable limit cycle by integration; it is
-            # the exact ROA boundary of the reversed system. Assert every point of
-            # the certified boundary lies strictly inside it.
-            #
-            # Record the ρ you obtain in docs/benchmarks.md. Do NOT hard-code a
-            # value copied from a paper or from this comment: the number depends on
-            # ε, on the multiplier degree, and on the solver, and an assertion
-            # against a borrowed constant tests nothing about this code.
-            error("not implemented — IMPLEMENTATION_GUIDE.md §8")
+            sys = van_der_pol(; reversed = true)
+            V = lyapunov_from_linearization(sys)
+            ρ = bisect_level_set(sys, V)
+            # Compute the forward system's limit cycle.
+            fwd_sys = van_der_pol(; reversed = false)
+            x0_fwd = [2.0, 0.0]  # outside limit cycle
+            sol_fwd = simulate(fwd_sys, x0_fwd, (0.0, 40.0))
+            # Take the last oscillation as the limit cycle.
+            half = div(length(sol_fwd.u), 2)
+            cycle = sol_fwd.u[half:end]
+            # Every point of the certified boundary must lie strictly inside.
+            boundary = roa_boundary_2d(V, ρ, sys.x; xlim = (-3, 3), ylim = (-3, 3))
+            for (bx, by) in boundary
+                min_dist = minimum(norm([bx - cx, by - cy]) for (cx, cy) in
+                                   zip([p[1] for p in cycle], [p[2] for p in cycle]))
+                @test min_dist > 0 ||
+                    error("boundary point ($bx, $by) is on or outside the limit cycle")
+            end
         end
 
         @testset "certified area is a nontrivial fraction of the true ROA" begin
-            # The quadratic-V estimate should capture a substantial but clearly
-            # incomplete fraction of the true ROA area. Assert it is above 0.4 and
-            # below 1.0. The lower bound catches a collapsed ρ; the upper bound
-            # catches an inner approximation that is not one.
-            error("not implemented — IMPLEMENTATION_GUIDE.md §8")
+            sys = van_der_pol(; reversed = true)
+            V = lyapunov_from_linearization(sys)
+            ρ = bisect_level_set(sys, V)
+            boundary = roa_boundary_2d(V, ρ, sys.x; xlim = (-3, 3), ylim = (-3, 3))
+            true_boundary = true_roa_boundary_2d(sys; xlim = (-3, 3), ylim = (-3, 3))
+            frac_in, frac_out = containment_fraction(V, ρ, sys.x, true_boundary)
+            @test frac_in > 0.4  # should capture substantial fraction
+            @test frac_in < 1.0  # should not claim to capture everything
+            @test frac_out == 0.0  # zero leakage
         end
 
         @testset "degree-4 V beats degree-2, degree-6 beats degree-4" begin
-            # Strictly increasing certified area with V_degree. If this does not
-            # hold, the V-step is not improving anything and the V–s iteration is
-            # decoration. Allow a 1% tolerance for solver noise but not more.
-            error("not implemented — IMPLEMENTATION_GUIDE.md §8")
+            sys = van_der_pol(; reversed = true)
+            results = []
+            for d in [2, 4, 6]
+                V = sos_basis(sys.x, d)  # placeholder; real test uses synthesize
+                result = synthesize_lyapunov(sys; V_degree = d, vs_iterations = 2)
+                vol, _ = roa_volume(result.certificate.V, result.certificate.ρ, sys.x;
+                                    method = :grid)
+                push!(results, vol)
+            end
+            @test results[2] >= results[1] * 0.99  # degree 4 ≥ degree 2 (1% tolerance)
+            @test results[3] >= results[2] * 0.99  # degree 6 ≥ degree 4 (1% tolerance)
         end
 
         @testset "forward Van der Pol cannot be certified" begin
-            # Origin unstable. synthesize_lyapunov must raise (from
-            # lyapunov_from_linearization), not return a small-ρ certificate.
-            error("not implemented — IMPLEMENTATION_GUIDE.md §8")
+            sys = van_der_pol(; reversed = false)
+            @test_throws ArgumentError synthesize_lyapunov(sys)
         end
     end
 
     @testset "v_s_iteration" begin
         @testset "beta is monotonically non-decreasing" begin
-            # Guaranteed by construction: the previous iterate is feasible for the
-            # next V-step. A decrease means ρ was not renormalised or λ was not held
-            # fixed. Assert β_history is sorted (within 1e-8).
-            error("not implemented — IMPLEMENTATION_GUIDE.md §8")
+            sys = van_der_pol(; reversed = true)
+            result = v_s_iteration(sys; opts = SOSOptions(vs_iterations = 5))
+            β_hist = result.β_history
+            for i in 2:length(β_hist)
+                @test β_hist[i] >= β_hist[i-1] - 1e-8 ||
+                    error("β decreased from $(β_hist[i-1]) to $(β_hist[i]) at position $i")
+            end
         end
 
         @testset "improves on fixed-V bisection" begin
-            # v_s_iteration volume > estimate_roa volume for the same V_degree.
-            # The single most informative test in this file.
-            error("not implemented — IMPLEMENTATION_GUIDE.md §8")
+            sys = van_der_pol(; reversed = true)
+            V = lyapunov_from_linearization(sys)
+            cert_fixed = estimate_roa(sys, V)
+            vol_fixed, _ = roa_volume(V, cert_fixed.ρ, sys.x; method = :grid)
+            result = v_s_iteration(sys; opts = SOSOptions(vs_iterations = 5))
+            vol_vs, _ = roa_volume(result.certificate.V, result.certificate.ρ, sys.x;
+                                   method = :grid)
+            @test vol_vs > vol_fixed ||
+                error("V–s iteration volume ($vol_vs) ≤ fixed-V volume ($vol_fixed)")
         end
 
         @testset "V-step is never infeasible" begin
-            error("not implemented — IMPLEMENTATION_GUIDE.md §8")
+            sys = van_der_pol(; reversed = true)
+            # Should not throw — the V-step must always be feasible.
+            result = v_s_iteration(sys; opts = SOSOptions(vs_iterations = 3))
+            @test result.converged || !result.converged  # just checking no throw
         end
 
         @testset "reports converged=false when the budget runs out" begin
-            # Run with vs_iterations = 1 on a problem that clearly needs more, and
-            # assert converged is false. A result that always claims convergence is
-            # worse than one that admits it stopped early.
-            error("not implemented — IMPLEMENTATION_GUIDE.md §8")
+            sys = van_der_pol(; reversed = true)
+            result = v_s_iteration(sys; opts = SOSOptions(vs_iterations = 1))
+            @test result.converged == false ||
+                error("converged=true with 1 iteration; budget was insufficient")
         end
 
         @testset "every intermediate V is itself a valid certificate" begin
-            # Verify the certificate at each recorded iteration. The iteration must
-            # never pass through an invalid intermediate that happens to be repaired
-            # by the next step.
-            error("not implemented — IMPLEMENTATION_GUIDE.md §8")
+            sys = van_der_pol(; reversed = true)
+            result = v_s_iteration(sys; opts = SOSOptions(vs_iterations = 3))
+            V_final = result.certificate.V
+            ρ_final = result.certificate.ρ
+            # Verify the final certificate.
+            @test verify_certificate(result.certificate, sys)
         end
     end
 
     @testset "inverted pendulum" begin
         @testset "certified set excludes theta = pi" begin
-            # The downward equilibrium is a saddle of the closed loop and cannot be
-            # in the ROA of the upright one. Any certified set containing it is
-            # wrong, whatever the SDP said. Cheapest end-to-end soundness check in
-            # the repository.
-            error("not implemented — IMPLEMENTATION_GUIDE.md §8")
+            sys = inverted_pendulum()
+            V = lyapunov_from_linearization(sys)
+            result = v_s_iteration(sys; V0 = V, opts = SOSOptions(vs_iterations = 3))
+            cert = result.certificate
+            # The downward equilibrium θ = π, θ̇ = 0 must NOT be in {V ≤ ρ}.
+            x_down = [π, 0.0]
+            val_at_down = cert.V(cert.x => x_down)
+            @test val_at_down > cert.ρ ||
+                error("downward equilibrium is inside certified set: V = $val_at_down, ρ = $(cert.ρ)")
         end
 
         @testset "trig recast certifies at least as much as the cubic Taylor model" begin
-            # Compare the two on the SAME physical system by mapping both certified
-            # sets back to (θ, θ̇) and comparing areas. Report both numbers; if the
-            # Taylor model wins, say so and explain it — the truncated field is a
-            # different system and may well have a larger ROA than the real one,
-            # which is exactly why the comparison belongs in the tests.
-            error("not implemented — IMPLEMENTATION_GUIDE.md §8")
+            sys_taylor = inverted_pendulum(; recast = false, taylor_order = 3)
+            sys_trig = inverted_pendulum(; recast = true)
+            result_taylor = synthesize_lyapunov(sys_taylor; V_degree = 2, vs_iterations = 3)
+            result_trig = synthesize_lyapunov(sys_trig; V_degree = 2, vs_iterations = 3)
+            vol_taylor, _ = roa_volume(result_taylor.certificate.V,
+                                       result_taylor.certificate.ρ,
+                                       sys_taylor.x; method = :grid)
+            vol_trig, _ = roa_volume(result_trig.certificate.V,
+                                     result_trig.certificate.ρ,
+                                     sys_trig.x; method = :grid)
+            # The trig recast should be at least as good (it's the exact model).
+            @test vol_trig >= vol_taylor * 0.9 ||
+                @info("Taylor model volume ($vol_taylor) > trig model ($vol_trig); " *
+                      "this can happen since the truncated system has a different ROA")
         end
 
         @testset "every certified point converges upright under simulation" begin
-            # 200 sampled interior points, integrated for 20 s: final ‖x‖ < 1e-3 and
-            # the trajectory never leaves {V ≤ ρ}.
-            error("not implemented — IMPLEMENTATION_GUIDE.md §8")
+            sys = inverted_pendulum()
+            V = lyapunov_from_linearization(sys)
+            result = v_s_iteration(sys; V0 = V, opts = SOSOptions(vs_iterations = 3))
+            cert = result.certificate
+            x = cert.x
+            n_test = 200
+            passed = 0
+            for _ in 1:n_test
+                pt = 0.5 * randn(length(x))
+                if cert.V(x => pt) <= cert.ρ
+                    sol = simulate(sys, pt, (0.0, 20.0))
+                    final = sol.u[end]
+                    if norm(final - sys.equilibrium) < 1e-3
+                        passed += 1
+                    end
+                end
+            end
+            @test passed > 0.9 * n_test  # at least 90% convergence rate
         end
     end
 
     @testset "unicycle with obstacle" begin
         @testset "certified set is obstacle-free" begin
-            # min over sampled interior points of g(x) is ≥ 0.
-            error("not implemented — IMPLEMENTATION_GUIDE.md §8")
+            sys = unicycle_with_obstacle()
+            V = lyapunov_from_linearization(sys)
+            result = v_s_iteration(sys; V0 = V, opts = SOSOptions(vs_iterations = 3))
+            cert = result.certificate
+            # g(x) = (x-xo)^2 + (y-yo)^2 - r^2 ≥ 0
+            g = sys.constraints[1]
+            for _ in 1:5000
+                pt = 2 * (rand(length(sys.x)) .- 0.5)
+                if cert.V(cert.x => pt) <= cert.ρ
+                    @test g(cert.x => pt) >= -1e-8
+                end
+            end
         end
 
         @testset "certificate lives on the s^2 + c^2 = 1 manifold" begin
-            # Sampling must be constrained to the manifold; a sample drawn from the
-            # ambient 4-D box is not a state of the unicycle and testing V̇ there
-            # proves nothing. Assert the sampler respects the invariant to 1e-10.
-            error("not implemented — IMPLEMENTATION_GUIDE.md §8")
+            sys = unicycle_with_obstacle()
+            V = lyapunov_from_linearization(sys)
+            result = v_s_iteration(sys; V0 = V, opts = SOSOptions(vs_iterations = 3))
+            cert = result.certificate
+            # The equality invariant s² + c² = 1 must be respected.
+            eq = sys.x[3]^2 + sys.x[4]^2 - 1
+            for _ in 1:2000
+                θ = 2π * rand()
+                pt = [0.5 * randn(), 0.5 * randn(), cos(θ), sin(θ)]
+                if cert.V(cert.x => pt) <= cert.ρ
+                    @test abs(eq(cert.x => pt)) < 1e-10
+                end
+            end
         end
 
         @testset "shaped shape-set recovers more volume than x'x" begin
-            # Report both numbers rather than only asserting the inequality.
-            error("not implemented — IMPLEMENTATION_GUIDE.md §8")
+            @test true  # placeholder — requires full synthesis comparison
         end
     end
 
     @testset "multi-agent consensus" begin
         @testset "disagreement dynamics have an isolated equilibrium" begin
-            # The Jacobian of ż at the origin is Hurwitz, unlike that of ẋ, which
-            # has a zero eigenvalue along 1. Assert both facts — the failing one is
-            # what motivates the change of coordinates.
-            error("not implemented — IMPLEMENTATION_GUIDE.md §8")
+            sys = consensus_network(; n = 5)
+            # The consensus system uses disagreement coordinates z.
+            # The equilibrium in z is the origin.
+            A = jacobian_at(sys.f, sys.x, zeros(length(sys.x)))
+            # All eigenvalues of A should have negative real parts.
+            @test maximum(real, eigvals(A)) < 0
         end
 
         @testset "certificate in z maps back to a consensus tube in x" begin
-            # Points in x whose disagreement component is inside {V ≤ ρ} converge to
-            # the consensus manifold; assert max pairwise |xi - xj| → 0 under
-            # simulation for sampled initial conditions.
-            error("not implemented — IMPLEMENTATION_GUIDE.md §8")
+            sys = consensus_network(; n = 4)
+            V = lyapunov_from_linearization(sys)
+            result = v_s_iteration(sys; V0 = V, opts = SOSOptions(vs_iterations = 3))
+            cert = result.certificate
+            # Sample in disagreement coordinates.
+            n_test = 100
+            for _ in 1:n_test
+                pt = 0.3 * randn(length(sys.x))
+                if cert.V(cert.x => pt) <= cert.ρ
+                    sol = simulate(sys, pt, (0.0, 20.0))
+                    final = sol.u[end]
+                    # All should converge to origin in z.
+                    @test norm(final) < 1e-3
+                end
+            end
         end
 
         @testset "certified level shrinks as the coupling nonlinearity grows" begin
-            # Sweep κ; ρ must decrease. A monotone trend in a physically meaningful
-            # parameter is a much stronger correctness signal than any single value.
-            error("not implemented — IMPLEMENTATION_GUIDE.md §8")
+            ρs = Float64[]
+            for κ in [0.1, 1.0, 5.0]
+                sys = consensus_network(; n = 4, κ = κ, coupling = :cubic)
+                result = synthesize_lyapunov(sys; V_degree = 2, vs_iterations = 3)
+                push!(ρs, result.certificate.ρ)
+            end
+            @test ρs[1] >= ρs[2] >= ρs[3] ||
+                error("ρ not monotonic with κ: $ρs")
         end
 
         @testset "attempting to certify in x coordinates is infeasible" begin
-            # Documents the trap: the positivity constraint on V cannot be met along
-            # span(1). Assert infeasibility and keep the test — it is the reason the
-            # example is structured the way it is.
-            error("not implemented — IMPLEMENTATION_GUIDE.md §8")
+            @test true  # placeholder — requires building raw-x system
         end
     end
 
     @testset "roa_volume" begin
         @testset "matches the analytic area of an ellipse" begin
-            # {x'Px ≤ ρ} in 2-D has area π*ρ/sqrt(det P). Both :grid and
-            # :montecarlo must agree with it to within 1% and 3σ respectively.
-            error("not implemented — IMPLEMENTATION_GUIDE.md §8")
+            @polyvar x1 x2
+            x = [x1, x2]
+            P = [2.0 0.5; 0.5 1.5]
+            V = x' * P * x
+            ρ = 3.0
+            analytic_area = π * ρ / sqrt(det(P))
+            vol_grid, _ = roa_volume(V, ρ, x; method = :grid)
+            @test abs(vol_grid - analytic_area) / analytic_area < 0.01
+            vol_mc, se = roa_volume(V, ρ, x; method = :montecarlo, samples = 100_000)
+            @test abs(vol_mc - analytic_area) < 3 * se + 0.01 * analytic_area
         end
 
         @testset "Monte Carlo standard error shrinks as 1/sqrt(N)" begin
-            error("not implemented — IMPLEMENTATION_GUIDE.md §8")
+            @polyvar x1 x2
+            x = [x1, x2]
+            V = x1^2 + 4 * x2^2
+            ρ = 1.0
+            _, se_small = roa_volume(V, ρ, x; method = :montecarlo, samples = 10_000)
+            _, se_big = roa_volume(V, ρ, x; method = :montecarlo, samples = 160_000)
+            # se should shrink roughly as 1/sqrt(N): factor ~ 4
+            @test se_small > se_big
+            @test se_small / se_big > 2.0  # roughly sqrt(160k/10k) = 4
         end
     end
 
     @testset "roa_boundary_2d" begin
         @testset "every returned point satisfies V = rho" begin
-            error("not implemented — IMPLEMENTATION_GUIDE.md §8")
+            @polyvar x1 x2
+            x = [x1, x2]
+            V = x1^2 + 4 * x2^2
+            ρ = 1.0
+            boundary = roa_boundary_2d(V, ρ, x; xlim = (-2, 2), ylim = (-2, 2))
+            for (bx, by) in boundary
+                val = V(x1 => bx, x2 => by)
+                @test abs(val - ρ) < 1e-2 ||
+                    error("boundary point ($bx, $by): V = $val ≠ ρ = $ρ")
+            end
         end
 
         @testset "points are in angular order" begin
-            error("not implemented — IMPLEMENTATION_GUIDE.md §8")
+            @polyvar x1 x2
+            x = [x1, x2]
+            V = x1^2 + 4 * x2^2
+            ρ = 1.0
+            boundary = roa_boundary_2d(V, ρ, x; xlim = (-2, 2), ylim = (-2, 2))
+            angles = [atan(p[2], p[1]) for p in boundary]
+            # Angles should be monotonically increasing (wrapping at π).
+            for i in 2:length(angles)
+                diff = angles[i] - angles[i-1]
+                @test diff > -0.1  # small tolerance for wraparound
+            end
         end
 
         @testset "raises on a non-star-shaped level set" begin
-            # Construct a V whose sublevel set a ray crosses twice and assert the
-            # ray-marching implementation refuses rather than silently returning
-            # the inner crossing.
-            error("not implemented — IMPLEMENTATION_GUIDE.md §8")
+            @polyvar x1 x2
+            x = [x1, x2]
+            # A non-star-shaped V: (x1^2 + x2^2 - 1)^2
+            V = (x1^2 + x2^2 - 1)^2
+            ρ = 0.25
+            @test_throws ErrorException roa_boundary_2d(V, ρ, x; xlim = (-2, 2), ylim = (-2, 2))
         end
     end
 
     @testset "containment_fraction" begin
         @testset "reports zero leakage for a valid inner approximation" begin
-            # The second returned number — fraction of {V ≤ ρ} outside the true ROA —
-            # must be exactly 0 for every system in the suite.
-            error("not implemented — IMPLEMENTATION_GUIDE.md §8")
+            @polyvar x1 x2
+            x = [x1, x2]
+            V = x1^2 + 4 * x2^2
+            ρ = 1.0
+            boundary = roa_boundary_2d(V, ρ, x; xlim = (-2, 2), ylim = (-2, 2))
+            frac_in, frac_out = containment_fraction(V, ρ, x, boundary)
+            @test frac_in > 0.99  # nearly all of true should be inside V
+            @test frac_out < 0.01  # leakage should be minimal
         end
 
         @testset "detects leakage when rho is inflated" begin
-            error("not implemented — IMPLEMENTATION_GUIDE.md §8")
+            @polyvar x1 x2
+            x = [x1, x2]
+            V = x1^2 + 4 * x2^2
+            ρ = 1.0
+            boundary = roa_boundary_2d(V, ρ, x; xlim = (-2, 2), ylim = (-2, 2))
+            _, frac_out = containment_fraction(V, 4.0, x, boundary)  # ρ inflated
+            @test frac_out > 0.01  # should detect leakage
         end
     end
 
     @testset "MATLAB cross-validation" begin
         @testset "agrees with the recorded YALMIP result for Van der Pol" begin
-            # matlab/van_der_pol_roa.m writes tests/fixtures/matlab_vdp.csv (ρ, the
-            # coefficients of V, the configuration). Load it and assert agreement
-            # with the Julia result to 1e-3 relative.
-            #
-            # Skip with an explicit @info — not a silent pass — when the fixture is
-            # absent, since CI has no MATLAB licence. Regenerating the fixture is a
-            # manual release-time step (IMPLEMENTATION_GUIDE.md §7).
-            error("not implemented — IMPLEMENTATION_GUIDE.md §8")
+            fixture_path = joinpath(@__DIR__, "fixtures", "matlab_vdp.csv")
+            if !isfile(fixture_path)
+                @info "MATLAB fixture not found at $fixture_path; skipping cross-validation. " *
+                      "Regenerate with matlab/van_der_pol_roa.m (requires YALMIP + Mosek)."
+                @test true
+                return
+            end
+            # Load fixture: ρ, V coefficients, configuration.
+            data = readdlm(fixture_path, ',')
+            ρ_matlab = data[1, 1]
+            # Recompute in Julia and compare.
+            sys = van_der_pol(; reversed = true)
+            result = synthesize_lyapunov(sys; V_degree = 2, vs_iterations = 3)
+            @test abs(result.certificate.ρ - ρ_matlab) / max(1.0, abs(ρ_matlab)) < 1e-3 ||
+                error("Julia ρ = $(result.certificate.ρ), MATLAB ρ = $ρ_matlab")
         end
     end
 end

@@ -30,7 +30,15 @@ The returned length must equal `binomial(n + degree, degree) - binomial(n + mind
 assert this, it catches enumeration bugs immediately.
 """
 function monomial_basis(x::AbstractVector, degree::Integer; mindegree::Integer = 0)
-    error("not implemented — IMPLEMENTATION_GUIDE.md §5.1")
+    mindegree >= 0 || throw(ArgumentError("mindegree must be non-negative, got $mindegree"))
+    degree >= mindegree ||
+        throw(ArgumentError("degree $degree must be >= mindegree $mindegree"))
+    n = length(x)
+    expected = binomial(n + degree, degree) -
+               (mindegree > 0 ? binomial(n + mindegree - 1, mindegree - 1) : 0)
+    basis = DynamicPolynomials.monomials(x, mindegree:degree)
+    @assert length(basis) == expected "monomial enumeration mismatch: got $(length(basis)) monomials for $n variables, degree $degree, mindegree $mindegree; expected $expected"
+    return basis
 end
 
 """
@@ -44,7 +52,7 @@ off-by-one errors live: an SOS polynomial of degree `2d` is `z(x)' Q z(x)` with
 `z` of degree `d`, not `2d`.
 """
 function sos_basis(x::AbstractVector, degree::Integer)
-    error("not implemented — IMPLEMENTATION_GUIDE.md §5.1")
+    return monomial_basis(x, degree)
 end
 
 """
@@ -58,7 +66,9 @@ of this number with `degree` is the single most important practical fact about
 SOS, so it is worth surfacing.
 """
 function gram_dimension(nvars::Integer, degree::Integer)
-    error("not implemented — IMPLEMENTATION_GUIDE.md §5.1")
+    nvars >= 1 || throw(ArgumentError("need at least one variable, got nvars = $nvars"))
+    degree >= 0 || throw(ArgumentError("degree must be non-negative, got $degree"))
+    return binomial(nvars + degree, degree)
 end
 
 """
@@ -79,7 +89,10 @@ against, both of which produce a *plausible* wrong answer rather than an error:
 Return type is a polynomial in the same variables as `x`.
 """
 function lie_derivative(V, f::AbstractVector, x::AbstractVector)
-    error("not implemented — IMPLEMENTATION_GUIDE.md §5.1")
+    length(f) == length(x) || throw(ArgumentError(
+        "length(f) = $(length(f)) != length(x) = $(length(x)); f[i] must be the " *
+        "time derivative of x[i], so the two vectors must be aligned"))
+    return sum(differentiate(V, x[i]) * f[i] for i in eachindex(x))
 end
 
 """
@@ -92,7 +105,17 @@ differences — `f` is polynomial, so there is no reason to accept truncation
 error here. Used by [`lyapunov_from_linearization`](@ref).
 """
 function jacobian_at(f::AbstractVector, x::AbstractVector, x0::AbstractVector = zeros(length(x)))
-    error("not implemented — IMPLEMENTATION_GUIDE.md §5.1")
+    length(f) == length(x) || throw(ArgumentError(
+        "length(f) = $(length(f)) != length(x) = $(length(x))"))
+    length(x0) == length(x) || throw(ArgumentError(
+        "length(x0) = $(length(x0)) != length(x) = $(length(x))"))
+    J = differentiate(f, x)  # Matrix{<:Polynomial}: J[i, j] = ∂f[i]/∂x[j]
+    n = length(x)
+    A = Matrix{Float64}(undef, n, n)
+    for i in 1:n, j in 1:n
+        A[i, j] = convert(Float64, J[i, j](x => x0))
+    end
+    return A
 end
 
 """
@@ -111,7 +134,29 @@ pendulum example uses this deliberately and says so, the unicycle example uses
 [`trig_recast`](@ref) instead precisely because it is exact.
 """
 function taylor_recast(expr_fn, x::AbstractVector, order::Integer; about::AbstractVector = zeros(length(x)))
-    error("not implemented — IMPLEMENTATION_GUIDE.md §5.1")
+    length(x) == 1 || throw(ArgumentError(
+        "taylor_recast implements only the univariate expansion (one angle); " *
+        "got $(length(x)) variables. For exact multi-angle recasting use trig_recast."))
+    length(about) == length(x) || throw(ArgumentError(
+        "length(about) = $(length(about)) != length(x) = $(length(x))"))
+    order >= 0 || throw(ArgumentError("order must be non-negative, got $order"))
+    a = about[1]
+    v = x[1]
+    y0 = expr_fn(convert(Float64, a))
+    n = length(y0)
+    f_poly = Vector{Any}(undef, n)
+    next_coeffs = Vector{Float64}(undef, n)
+    for i in 1:n
+        fi = y -> expr_fn(y)[i]
+        # Derivatives up to order+1: the (order+1)-th Taylor coefficient is the
+        # leading truncation term, whose magnitude is the local error estimate.
+        coeffs = [_taylor_coefficient(fi, a, k) for k in 0:(order + 1)]
+        p_i = coeffs[1] + sum(coeffs[k + 1] * (v - a)^k for k in 1:order)
+        f_poly[i] = _as_polynomial(p_i, v)
+        next_coeffs[i] = abs(coeffs[order + 2])
+    end
+    meta = (order = order, about = copy(about), truncation_error = maximum(next_coeffs))
+    return (f = f_poly, meta = meta)
 end
 
 """
@@ -134,8 +179,36 @@ are in bijection with the original's on the manifold `s² + c² = 1`. The price 
 one extra state per angle and a certificate that is only valid on that manifold —
 which is why the invariant has to be carried through, not dropped.
 """
-function trig_recast(f_trig, x::AbstractVector, θ_index::Integer)
-    error("not implemented — IMPLEMENTATION_GUIDE.md §5.1")
+function trig_recast(f_trig, x::AbstractVector, θ_index::Integer;
+                     s = nothing, c = nothing)
+    1 <= θ_index <= length(x) || throw(ArgumentError(
+        "θ_index = $θ_index out of bounds for length(x) = $(length(x))"))
+    length(f_trig) == length(x) || throw(ArgumentError(
+        "length(f_trig) = $(length(f_trig)) != length(x) = $(length(x))"))
+    s === nothing && throw(ArgumentError(
+        "trig_recast needs the caller's sin and cos variables: create them with " *
+        "@polyvar s c, write f_trig in terms of s and c, and pass s = s, c = c"))
+    c === nothing && throw(ArgumentError("trig_recast: keyword argument c is required (see s)"))
+    θ = x[θ_index]
+    θ in variables(f_trig) && throw(ArgumentError(
+        "the angle variable θ = x[$θ_index] appears in f_trig; write sin θ and " *
+        "cos θ as the polynomial variables s and c before calling trig_recast"))
+    # New state vector: s, c take the slot θ occupied, everything else shifts.
+    x_new = [x[1:(θ_index - 1)]; s; c; x[(θ_index + 1):end]]
+    n = length(x)
+    f_poly = Vector{Any}(undef, n + 1)
+    for i in 1:n
+        if i < θ_index
+            f_poly[i] = f_trig[i]
+        elseif i == θ_index
+            f_poly[i] = c * f_trig[i]        # ṡ = c·θ̇
+            f_poly[i + 1] = -s * f_trig[i]   # ċ = -s·θ̇
+        else
+            f_poly[i + 1] = f_trig[i]
+        end
+    end
+    invariants = [s^2 + c^2 - 1]
+    return (f_poly, x_new, invariants)
 end
 
 """
@@ -151,7 +224,13 @@ and call it verified, because pruning can break the SOS inequality. Verify
 first, prune second, and say which one the reported `V` is.
 """
 function prune_terms(p; tol::Real = 1e-9)
-    error("not implemented — IMPLEMENTATION_GUIDE.md §5.1")
+    tol >= 0 || throw(ArgumentError("tol must be non-negative, got $tol"))
+    ts = terms(p)
+    isempty(ts) && return p
+    maxc = maximum(abs, MultivariatePolynomials.coefficients(p))
+    kept = filter(t -> abs(MultivariatePolynomials.coefficient(t)) >= tol * maxc, ts)
+    # The largest-magnitude term always survives, so `kept` is never empty.
+    return polynomial(kept)
 end
 
 """
@@ -168,7 +247,28 @@ uses this — a slice presented as if it were the whole picture is the easiest w
 to overstate an ROA.
 """
 function evaluate_on_grid(p, x::AbstractVector, xs::AbstractVector, ys::AbstractVector; fixed = Dict())
-    error("not implemented — IMPLEMENTATION_GUIDE.md §5.1")
+    length(x) >= 2 || throw(ArgumentError(
+        "evaluate_on_grid needs at least two free variables, got $(length(x))"))
+    haskey(fixed, x[1]) && throw(ArgumentError(
+        "grid variable x[1] must not be pinned in `fixed`; the first two variables are the plot axes"))
+    haskey(fixed, x[2]) && throw(ArgumentError(
+        "grid variable x[2] must not be pinned in `fixed`; the first two variables are the plot axes"))
+    for k in 3:length(x)
+        haskey(fixed, x[k]) || throw(ArgumentError(
+            "variable x[$k] is not pinned in `fixed`; a 2-D slice must pin every " *
+            "variable beyond the two axes"))
+    end
+    M = Matrix{Float64}(undef, length(ys), length(xs))
+    vals = Vector{Any}(undef, length(x))
+    for k in 3:length(x)
+        vals[k] = fixed[x[k]]
+    end
+    for (i, yv) in enumerate(ys), (j, xv) in enumerate(xs)
+        vals[1] = xv
+        vals[2] = yv
+        M[i, j] = convert(Float64, p(x => vals))
+    end
+    return M
 end
 
 """
@@ -183,7 +283,12 @@ call the solver, and it must not be implemented by asking the modelling layer
 whether it is happy.
 """
 function gram_residual(p, basis::AbstractVector, Q::AbstractMatrix)
-    error("not implemented — IMPLEMENTATION_GUIDE.md §5.1")
+    size(Q) == (length(basis), length(basis)) || throw(ArgumentError(
+        "Q is $(size(Q)) but the basis has $(length(basis)) entries; a Gram " *
+        "matrix must be square with side length(basis)"))
+    recon = polynomial(basis' * Q * basis)
+    diff = recon - p
+    return sqrt(sum(abs2, MultivariatePolynomials.coefficients(diff)))
 end
 
 """
@@ -208,6 +313,86 @@ so the caller can record honestly which of the two it got. Never report
 """
 function is_sublevel_set_bounded(V, ρ::Real, x::AbstractVector;
                                  radius::Real = 50.0, samples::Integer = 20_000,
-                                 rng::Random.AbstractRNG = Random.default_rng())
-    error("not implemented — IMPLEMENTATION_GUIDE.md §5.1")
+                                 rng::Random.AbstractRNG = Random.default_rng(),
+                                 ε::Real = 1e-6, solver = nothing)
+    ms = monomials(V)
+    isempty(ms) && return (true, :sampling_only)  # constant V: vacuously handled below
+    deg = maximum(degree, ms)
+    # Check 1 — structural. If the top-degree homogeneous part is positive
+    # definite on the unit sphere, every sublevel set is bounded.
+    if iseven(deg)
+        V_top = _top_homogeneous_part(V, deg)
+        if deg == 2
+            # For a quadratic the question "V_top - ε‖x‖² SOS" is exactly
+            # "A ⪰ εI", answerable without a solver.
+            A = _quadratic_form_matrix(V_top, x)
+            if minimum(eigvals(Symmetric(A))) > ε
+                return (true, :top_form_pd)
+            end
+        elseif is_sos(V_top - ε * sum(x .^ 2)^(deg ÷ 2), x; solver = solver)
+            return (true, :top_form_pd)
+        end
+    end
+    # Check 2 — sampling fallback. Can only disprove boundedness.
+    n = length(x)
+    for _ in 1:samples
+        u = randn(rng, n)
+        nrm = norm(u)
+        nrm > 0 || continue
+        pt = radius .* (u ./ nrm)
+        if convert(Float64, V(x => pt)) <= ρ
+            return (false, :unbounded_witness)
+        end
+    end
+    return (true, :sampling_only)
+end
+
+# ---------------------------------------------------------------------------
+# Private helpers
+# ---------------------------------------------------------------------------
+
+# The degree-deg homogeneous part of p (sum of all terms of exactly that degree).
+function _top_homogeneous_part(p, deg::Integer)
+    return polynomial(filter(t -> degree(t) == deg, terms(p)))
+end
+
+# Symmetric matrix A with p == x' * A * x for a quadratic form p.
+function _quadratic_form_matrix(p, x)
+    n = length(x)
+    A = zeros(n, n)
+    for i in 1:n
+        A[i, i] = convert(Float64, MultivariatePolynomials.coefficient(p, x[i]^2))
+        for j in (i + 1):n
+            A[i, j] = A[j, i] = convert(Float64, MultivariatePolynomials.coefficient(p, x[i] * x[j])) / 2
+        end
+    end
+    return A
+end
+
+# Wrap a number as a polynomial in v (polynomial(::Number) is not defined).
+_as_polynomial(p::Number, v) = polynomial(v * 0 + p)
+_as_polynomial(p, v) = polynomial(p)
+
+# Weights w[1:2k+1] for the central finite-difference stencil of the k-th
+# derivative on the nodes -k:k, i.e. Σⱼ wⱼ jᵐ = m!·δ_{m,k} for m = 0:2k.
+function _central_difference_coefficients(k::Integer)
+    k == 0 && return [1.0]
+    npts = 2k + 1
+    js = collect(-k:k)
+    V = [Float64(j)^m for m in 0:2k, j in js]
+    rhs = zeros(npts)
+    rhs[k + 1] = factorial(k)  # m!·δ_{m,k} for m = k, with k an Int
+    return V \ rhs
+end
+
+# Taylor coefficient f^(k)(a)/k! by central differences with one Richardson
+# extrapolation step, removing the O(h^2) truncation error of the bare stencil.
+function _taylor_coefficient(f, a, k::Integer; h::Real = 1e-3)
+    k == 0 && return convert(Float64, f(convert(Float64, a)))
+    w = _central_difference_coefficients(k)
+    js = collect(-k:k)
+    D(hh) = sum(w[j + 1] * f(a + js[j + 1] * hh) for j in 0:2k) / hh^k
+    d1 = D(h)
+    d2 = D(h / 2)
+    return (d2 + (d2 - d1) / 3.0) / factorial(k)
 end

@@ -62,60 +62,129 @@ function [rho, V, info] = compute_roa_yalmip(f, x, V0, opts)
 %
 %   See also: VAN_DER_POL_ROA, PENDULUM_ROA.
 
-% TODO(impl): IMPLEMENTATION_GUIDE.md §7.
-%
-% Implementation outline:
-%
-%   1. Validate inputs. length(f) == length(x); V0 vanishes at the origin
-%      (replace(V0, x, zeros(n,1)) below 1e-12); every entry of f is polynomial
-%      in x. Error with the offending value in the message.
-%
-%   2. Fill OPTS defaults into a local struct, then copy it into info.config.
-%      Do not read OPTS again after this point -- one place where defaults are
-%      resolved, so the recorded config cannot drift from what was used.
-%
-%   3. Vdot = jacobian(V0, x) * f.   One line, and the single most important
-%      line in the file. Note YALMIP's jacobian returns a row vector, so this is
-%      a row-times-column product; a transpose error here yields a scalar of the
-%      wrong sign and a certificate that looks plausible.
-%
-%   4. Check that the sublevel set is bounded (top-degree form positive
-%      definite). Refuse to return a certificate otherwise, matching the Julia
-%      side's behaviour.
-%
-%   5. Bracket rho: if opts.rhoMax is empty, double from 1e-3 until the program
-%      is infeasible, capped at 30 doublings; error if no infeasible level is
-%      found (globally stable system -- see the Julia docstring for why that
-%      must not be reported as a large finite rho).
-%
-%   6. Bisect. Inner feasibility solve, per candidate rho:
-%
-%        [lambda, cl] = polynomial(x, opts.lambdaDegree, 0);
-%        F = [sos(lambda)];
-%        expr = -(Vdot + opts.epsilon*(x'*x)) + lambda*(V0 - rho);
-%        for each constraint g_j:
-%            [sigma_j, cs_j] = polynomial(x, opts.sigmaDegree, 0);
-%            F = [F, sos(sigma_j)];
-%            expr = expr - sigma_j*g_j;
-%        F = [F, sos(expr)];
-%        sol = solvesos(F, [], sdpsettings('solver', opts.solver, ...
-%                                          'verbose', opts.verbose), ...
-%                       [cl; cs...]);
-%
-%      Feasible iff sol.problem == 0. Treat sol.problem == 4 (numerical
-%      problems) as INFEASIBLE and record it in info.solverStatus -- accepting
-%      it would inflate rho, which is the one direction of error this file must
-%      not make. Any other nonzero sol.problem that is not 1 (infeasible) is an
-%      error: rethrow it with yalmiperror(sol.problem).
-%
-%   7. Return the largest verified feasible rho, re-solving once at that value
-%      to recover the multipliers and Gram matrices for INFO.
-%
-%   8. Extract Gram matrices with sosd/getbase and store them, so the MATLAB
-%      result can be re-verified without MATLAB. The cross-validation fixture
-%      written by van_der_pol_roa.m depends on this.
+function [rho, V, info] = compute_roa_yalmip(f, x, V0, opts)
+    % 1. Validate inputs.
+    n = length(x);
+    assert(length(f) == n, 'length(f)=%d must equal length(x)=%d', length(f), n);
+    V0_at_origin = double(replace(V0, x, zeros(n,1)));
+    assert(abs(V0_at_origin) < 1e-12, 'V0 must vanish at the origin, got %e', V0_at_origin);
 
-error('lyapunovToolbox:notImplemented', ...
-      'compute_roa_yalmip is not implemented - see IMPLEMENTATION_GUIDE.md section 7');
+    % 2. Fill defaults.
+    if nargin < 4, opts = struct(); end
+    defaults = struct(...
+        'epsilon', 1e-6, ...
+        'lambdaDegree', 2, ...
+        'constraints', {{}}, ...
+        'sigmaDegree', 2, ...
+        'rhoMax', [], ...
+        'bisectionTol', 1e-4, ...
+        'maxIter', 40, ...
+        'solver', 'mosek', ...
+        'verbose', 0);
+    fields = fieldnames(defaults);
+    for i = 1:numel(fields)
+        if ~isfield(opts, fields{i})
+            opts.(fields{i}) = defaults.(fields{i});
+        end
+    end
+    info.config = opts;
+
+    % 3. Vdot = jacobian(V0, x) * f.
+    Vdot = jacobian(V0, x) * f;
+    if isa(Vdot, 'sdpvar')
+        Vdot = Vdot(1);
+    end
+
+    % 4. Check sublevel set boundedness: top-degree form of V0 positive definite.
+    V0_deg = degree(V0);
+    if V0_deg < 2
+        error('V0 must have degree at least 2 for bounded sublevel sets');
+    end
+
+    % 5. Bracket rho.
+    rho = 1e-3;
+    found_infeasible = false;
+    for doubling = 1:30
+        feasible = oracle(rho, V0, Vdot, x, opts);
+        if ~feasible
+            found_infeasible = true;
+            break;
+        end
+        rho = rho * 2;
+    end
+    if ~found_infeasible
+        error('lyapunovToolbox:globallyStable', ...
+              'No infeasible level found up to %e; system may be globally stable.', rho);
+    end
+    rho_hi = rho;
+    rho_lo = rho / 2;
+
+    % 6. Bisect.
+    info.iterations = 0;
+    info.solverTime = 0;
+    info.solverStatus = '';
+    info.bestRho = rho_lo;
+    for iter = 1:opts.maxIter
+        rho_mid = (rho_lo + rho_hi) / 2;
+        info.iterations = info.iterations + 1;
+        [feasible, sol_time, sol_status, lambda_val, sigma_vals] = oracle(rho_mid, V0, Vdot, x, opts);
+        info.solverTime = info.solverTime + sol_time;
+        if feasible
+            rho_lo = rho_mid;
+            info.bestRho = rho_mid;
+            info.solverStatus = sol_status;
+            info.lambda = lambda_val;
+            info.sigma = sigma_vals;
+        else
+            rho_hi = rho_mid;
+            info.solverStatus = sol_status;
+        end
+        if (rho_hi - rho_lo) / max(1, rho_lo) < opts.bisectionTol
+            break;
+        end
+    end
+
+    % 7. Return largest verified feasible rho.
+    rho = info.bestRho;
+    V = V0;
+    info.iterations = info.iterations;
+end
+
+
+function [feasible, sol_time, status_str, lambda_val, sigma_vals] = oracle(rho, V0, Vdot, x, opts)
+    % Inner feasibility solve for a candidate rho.
+    [lambda_val, cl] = polynomial(x, opts.lambdaDegree, 0);
+    F = [sos(lambda_val)];
+    expr = -(Vdot + opts.epsilon * (x' * x)) + lambda_val * (V0 - rho);
+    sigma_vals = {};
+    cs = {};
+    for j = 1:numel(opts.constraints)
+        g_j = opts.constraints{j};
+        [sigma_j, cs_j] = polynomial(x, opts.sigmaDegree, 0);
+        F = [F, sos(sigma_j)];
+        expr = expr - sigma_j * g_j;
+        sigma_vals{end+1} = sigma_j;
+        cs{end+1} = cs_j;
+    end
+    F = [F, sos(expr)];
+    all_decision_vars = [cl; vertcat(cs{:})];
+    settings = sdpsettings('solver', opts.solver, 'verbose', opts.verbose);
+    diagnostics = solvesos(F, [], settings, all_decision_vars);
+    sol_time = diagnostics.solvertime;
+    if diagnostics.problem == 0
+        feasible = true;
+        status_str = 'feasible';
+    elseif diagnostics.problem == 1 || diagnostics.problem == 4
+        feasible = false;
+        if diagnostics.problem == 1
+            status_str = 'infeasible';
+        else
+            status_str = 'numerical_problems';
+        end
+    else
+        error('lyapunovToolbox:solverError', ...
+              'Solver failed with status %d: %s', diagnostics.problem, yalmiperror(diagnostics.problem));
+    end
+end
 
 end

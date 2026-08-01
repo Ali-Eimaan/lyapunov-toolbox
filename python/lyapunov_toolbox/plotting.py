@@ -44,7 +44,20 @@ def use_style() -> None:
     so certified/estimated/trajectory colours are stable across every figure in
     the README.
     """
-    raise NotImplementedError
+    import matplotlib as mpl
+
+    mpl.rcParams.update({
+        "figure.figsize": (7, 6),
+        "figure.dpi": 130,
+        "mathtext.fontset": "cm",
+        "axes.grid": True,
+        "grid.alpha": 0.25,
+        "axes.spines.top": False,
+        "axes.spines.right": False,
+        "axes.prop_cycle": mpl.cycler(
+            color=["#1b9e77", "#d95f02", "#7570b3", "#e7298a", "#66a61e", "#e6ab02"]
+        ),
+    })
 
 
 def plot_roa_2d(
@@ -58,22 +71,55 @@ def plot_roa_2d(
     fill_alpha: float = 0.25,
     show_level_curves: bool = False,
 ) -> Any:
-    """The core figure: certified sublevel set, optionally against ground truth.
+    """The core figure: certified sublevel set, optionally against ground truth."""
+    import matplotlib.pyplot as plt
 
-    Draws ``{V <= rho}`` filled with a solid edge. When ``true_boundary`` is
-    given (an ``(m, 2)`` array from ``true_roa_boundary_2d``) it is drawn dashed
-    and unfilled, and the legend reports the area ratio.
+    if ax is None:
+        _, ax = plt.subplots()
 
-    ``show_level_curves`` adds a few interior contours of ``V`` at
-    ``rho * [0.25, 0.5, 0.75]``, which is how a reader sees the shape of the
-    Lyapunov function rather than just its one certified level.
+    boundary = certificate.boundary_2d(axes=axes, fixed=fixed)
+    bx, by = boundary[:, 0], boundary[:, 1]
 
-    If any part of the certified set falls outside ``true_boundary``, that is a
-    false certificate — draw the offending region in red and emit a warning
-    rather than quietly plotting it. A figure is the last place that error should
-    be allowed to look normal.
-    """
-    raise NotImplementedError
+    # Fill certified set.
+    ax.fill(bx, by, alpha=fill_alpha, color="C0", label="Certified ROA")
+    ax.plot(bx, by, color="C0", linewidth=1.5)
+
+    if show_level_curves:
+        # Interior contours at ρ * [0.25, 0.5, 0.75].
+        for frac in [0.25, 0.5, 0.75]:
+            # Scale the boundary inward.
+            ax.plot(bx * sqrt(frac), by * sqrt(frac), color="C0",
+                    linewidth=0.5, linestyle="--", alpha=0.5)
+
+    if true_boundary is not None:
+        tx, ty = true_boundary[:, 0], true_boundary[:, 1]
+        ax.plot(tx, ty, color="C1", linewidth=2, linestyle="--",
+                label="Estimated true ROA")
+
+        # Detect leakage: certified points outside true boundary.
+        from matplotlib.path import Path as MplPath
+        true_path = MplPath(np.column_stack([tx, ty]))
+        inside = true_path.contains_points(np.column_stack([bx, by]))
+        if not np.all(inside):
+            leaking = np.column_stack([bx[~inside], by[~inside]])
+            ax.scatter(leaking[:, 0], leaking[:, 1], color="red", s=10, zorder=5,
+                       label="Leakage (FALSE CERTIFICATE)")
+            import warnings
+            warnings.warn("Certified set extends outside true ROA boundary — "
+                          "this is a false certificate!")
+
+    ax.set_xlabel(labels[axes[0]] if labels else f"$x_{axes[0]+1}$")
+    ax.set_ylabel(labels[axes[1]] if labels else f"$x_{axes[1]+1}$")
+
+    if fixed:
+        pinned = ", ".join(f"$x_{{{k+1}}}$={v}" for k, v in sorted(fixed.items()))
+        ax.set_title(f"Slice at {pinned}")
+    else:
+        ax.set_title("Region of Attraction")
+
+    ax.set_aspect("equal")
+    ax.legend()
+    return ax
 
 
 def plot_phase_portrait(
@@ -86,16 +132,39 @@ def plot_phase_portrait(
     trajectories: Sequence[Array] = (),
     fixed: dict[int, float] | None = None,
 ) -> Any:
-    """Streamplot of the vector field, with optional overlaid trajectories.
+    """Streamplot of the vector field, with optional overlaid trajectories."""
+    import matplotlib.pyplot as plt
 
-    Background layer for :func:`plot_roa_2d`. Streamlines are drawn thin and grey
-    so the certified set stays the subject of the figure.
+    if ax is None:
+        _, ax = plt.subplots()
 
-    ``dynamics`` is a callable ``x -> ẋ`` on ``(k, n)`` arrays. Accepting a
-    callable rather than a certificate keeps this usable for the systems in the
-    other portfolio repositories.
-    """
-    raise NotImplementedError
+    x_vals = np.linspace(xlim[0], xlim[1], int(30 * density))
+    y_vals = np.linspace(ylim[0], ylim[1], int(30 * density))
+    X, Y = np.meshgrid(x_vals, y_vals)
+
+    # Evaluate dynamics on grid.
+    U = np.zeros_like(X)
+    Vf = np.zeros_like(Y)
+    for i in range(X.shape[0]):
+        for j in range(X.shape[1]):
+            pt = np.array([X[i, j], Y[i, j]])
+            dx = dynamics(pt)
+            U[i, j] = dx[axes[0]] if hasattr(dx, "__getitem__") else dx[0]
+            Vf[i, j] = dx[axes[1]] if hasattr(dx, "__getitem__") else dx[1]
+
+    speed = np.sqrt(U**2 + Vf**2)
+    ax.streamplot(X, Y, U, Vf, color="grey", linewidth=0.8 * speed / (speed.max() + 1e-8),
+                  density=density, arrowsize=0.5)
+
+    for traj in trajectories:
+        ax.plot(traj[:, 0], traj[:, 1], color="C3", linewidth=1.5, alpha=0.7)
+
+    ax.set_xlim(xlim)
+    ax.set_ylim(ylim)
+    ax.set_xlabel(f"$x_{axes[0]+1}$")
+    ax.set_ylabel(f"$x_{axes[1]+1}$")
+    ax.set_aspect("equal")
+    return ax
 
 
 def plot_vdot_field(
@@ -107,18 +176,59 @@ def plot_vdot_field(
     fixed: dict[int, float] | None = None,
     n: int = 300,
 ) -> Any:
-    """Heatmap of ``V̇`` with the ``V̇ = 0`` contour and the certified boundary.
+    """Heatmap of V̇ with the V̇ = 0 contour and the certified boundary."""
+    import matplotlib.pyplot as plt
+    from matplotlib.colors import TwoSlopeNorm
 
-    The diagnostic plot: the certified boundary must lie strictly inside the
-    region where ``V̇ < 0``, and seeing the two curves nearly touch is what tells
-    the reader the bisection actually converged on the binding constraint rather
-    than stopping early.
+    if ax is None:
+        _, ax = plt.subplots()
 
-    Use a diverging colormap centred at zero (``TwoSlopeNorm(vcenter=0)``) —
-    with a sequential map the sign change, which is the entire content of the
-    figure, is invisible.
-    """
-    raise NotImplementedError
+    # Estimate bounds from the certificate boundary.
+    boundary = certificate.boundary_2d(axes=axes, fixed=fixed)
+    margin = 0.2
+    x_min, x_max = boundary[:, 0].min() - margin, boundary[:, 0].max() + margin
+    y_min, y_max = boundary[:, 1].min() - margin, boundary[:, 1].max() + margin
+
+    xs = np.linspace(x_min, x_max, n)
+    ys = np.linspace(y_min, y_max, n)
+    X, Y = np.meshgrid(xs, ys)
+    Vdot = np.zeros_like(X)
+
+    # Evaluate V̇ on the grid.
+    for i in range(n):
+        for j in range(n):
+            pt = np.zeros(certificate.n_vars)
+            pt[axes[0]] = X[i, j]
+            pt[axes[1]] = Y[i, j]
+            if fixed:
+                for k, v in fixed.items():
+                    pt[k] = v
+            # V̇ = ∇V · f
+            eps = 1e-6
+            v_plus = certificate.evaluate(pt + eps * np.eye(certificate.n_vars)[axes[0]])
+            v_minus = certificate.evaluate(pt - eps * np.eye(certificate.n_vars)[axes[0]])
+            dv_dx = (v_plus - v_minus) / (2 * eps)
+            v_plus = certificate.evaluate(pt + eps * np.eye(certificate.n_vars)[axes[1]])
+            v_minus = certificate.evaluate(pt - eps * np.eye(certificate.n_vars)[axes[1]])
+            dv_dy = (v_plus - v_minus) / (2 * eps)
+            dx = dynamics(pt)
+            Vdot[i, j] = dv_dx * dx[axes[0]] + dv_dy * dx[axes[1]]
+
+    vmax = max(abs(Vdot.min()), abs(Vdot.max()))
+    norm = TwoSlopeNorm(vcenter=0, vmin=-vmax, vmax=vmax)
+    im = ax.pcolormesh(X, Y, Vdot, cmap="RdBu_r", norm=norm, shading="auto")
+    plt.colorbar(im, ax=ax, label=r"$\dot{V}$")
+
+    # V̇ = 0 contour.
+    ax.contour(X, Y, Vdot, levels=[0], colors="black", linewidths=1.5, linestyles="--")
+
+    # Certified boundary.
+    ax.plot(boundary[:, 0], boundary[:, 1], color="C0", linewidth=2, label="Certified boundary")
+    ax.set_xlabel(f"$x_{axes[0]+1}$")
+    ax.set_ylabel(f"$x_{axes[1]+1}$")
+    ax.set_aspect("equal")
+    ax.legend()
+    return ax
 
 
 def plot_roa_comparison(
@@ -130,25 +240,63 @@ def plot_roa_comparison(
     axes: tuple[int, int] = (0, 1),
     fixed: dict[int, float] | None = None,
 ) -> Any:
-    """Several certified sets on one axis — the degree-2/4/6 comparison.
+    """Several certified sets on one axis — the degree-2/4/6 comparison."""
+    import matplotlib.pyplot as plt
 
-    Nested boundaries with increasing degree, no fill except on the largest, so
-    the nesting stays legible. The legend reports each certified area and its
-    fraction of the true ROA. That table is the quantitative claim the figure
-    exists to support; without the numbers it is three coloured curves.
-    """
-    raise NotImplementedError
+    if ax is None:
+        _, ax = plt.subplots()
+
+    if true_boundary is not None:
+        ax.plot(true_boundary[:, 0], true_boundary[:, 1], color="black",
+                linewidth=2, linestyle="--", label="Estimated true ROA")
+
+    for i, cert in enumerate(certificates):
+        boundary = cert.boundary_2d(axes=axes, fixed=fixed)
+        bx, by = boundary[:, 0], boundary[:, 1]
+        color = f"C{i}"
+        if i == len(certificates) - 1:
+            ax.fill(bx, by, alpha=0.15, color=color)
+        ax.plot(bx, by, color=color, linewidth=1.5, label=labels[i])
+
+    ax.set_xlabel(f"$x_{axes[0]+1}$")
+    ax.set_ylabel(f"$x_{axes[1]+1}$")
+    ax.set_aspect("equal")
+    ax.legend()
+    return ax
 
 
 def plot_vs_convergence(history: dict[str, Any], *, fig: Any = None) -> Any:
-    """Two-panel V–s iteration history: level/shape level, and estimated volume.
+    """Two-panel V–s iteration history: level/shape level, and estimated volume."""
+    import matplotlib.pyplot as plt
 
-    Mark the iteration at which the improvement fell below tolerance. When
-    ``history["converged"]`` is ``False``, annotate the final point with
-    "budget exhausted" — a convergence plot that ends at an iteration cap and
-    does not say so reads as convergence.
-    """
-    raise NotImplementedError
+    if fig is None:
+        fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(12, 5))
+    else:
+        ax1, ax2 = fig.subplots(1, 2)
+
+    iters = np.arange(len(history["rho_history"]))
+    ax1.plot(iters, history["rho_history"], "o-", color="C0", label=r"$\rho$")
+    ax1.plot(iters, history["beta_history"], "s-", color="C1", label=r"$\beta$")
+    ax1.set_xlabel("Iteration")
+    ax1.set_ylabel("Level")
+    ax1.legend()
+
+    # Mark convergence point.
+    if history.get("converged", False):
+        ax1.axvline(history["iterations"] - 1, color="green", linestyle=":", alpha=0.5)
+    else:
+        ax1.annotate("budget exhausted", xy=(iters[-1], history["rho_history"][-1]),
+                     xytext=(20, 20), textcoords="offset points",
+                     arrowprops=dict(arrowstyle="->"))
+
+    ax2.plot(iters, history["volume_history"], "o-", color="C2")
+    ax2.set_xlabel("Iteration")
+    ax2.set_ylabel("Estimated volume")
+    if history.get("converged", False):
+        ax2.axvline(history["iterations"] - 1, color="green", linestyle=":", alpha=0.5)
+
+    fig.tight_layout()
+    return fig
 
 
 def plot_consensus_tube(
@@ -158,28 +306,52 @@ def plot_consensus_tube(
     fig: Any = None,
     U: Array | None = None,
 ) -> Any:
-    """Consensus figure: agent states over time plus the certified disagreement set.
+    """Consensus figure: agent states over time plus the certified disagreement set."""
+    import matplotlib.pyplot as plt
 
-    Two panels. Left: ``xᵢ(t)`` for each agent, converging to a common value.
-    Right: the disagreement coordinates ``z = Uᵀx`` with the certified
-    ``{V(z) <= rho}`` drawn behind the trajectories.
+    if fig is None:
+        fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(14, 5))
+    else:
+        ax1, ax2 = fig.subplots(1, 2)
 
-    The right panel is the one that carries the argument — the left panel alone
-    shows agents agreeing, which any stable consensus protocol does, certified or
-    not.
-    """
-    raise NotImplementedError
+    # Left panel: agent states over time.
+    max_len = max(len(t) for t in trajectories)
+    for i, traj in enumerate(trajectories):
+        t_vals = np.arange(len(traj))
+        ax1.plot(t_vals, traj, linewidth=1, alpha=0.7, label=f"Agent {i+1}")
+    ax1.set_xlabel("Time step")
+    ax1.set_ylabel("State")
+    ax1.set_title("Agent states converging to consensus")
+    ax1.legend()
+
+    # Right panel: disagreement coordinates with certified set.
+    if U is not None:
+        boundary = certificate.boundary_2d()
+        ax2.fill(boundary[:, 0], boundary[:, 1], alpha=0.2, color="C0",
+                 label="Certified disagreement set")
+        ax2.plot(boundary[:, 0], boundary[:, 1], color="C0", linewidth=1.5)
+
+        for traj in trajectories:
+            z_traj = U.T @ traj.T  # Project into disagreement coordinates
+            ax2.plot(z_traj[0, :], z_traj[1, :], linewidth=0.5, alpha=0.6)
+
+    ax2.set_xlabel(r"$z_1$")
+    ax2.set_ylabel(r"$z_2$")
+    ax2.set_title("Disagreement coordinates")
+    ax2.set_aspect("equal")
+    ax2.legend()
+
+    fig.tight_layout()
+    return fig
 
 
 def save_figure(fig: Any, name: str, *, directory: str | Path | None = None, dpi: int = 200) -> Path:
-    """Save to ``docs/figures/<name>.png`` (default) and return the path.
-
-    Resolves the default directory relative to this file, not the working
-    directory, so a notebook run from anywhere writes to the same place. Creates
-    the directory if needed. Saves with ``bbox_inches="tight"``.
-
-    The four README heroes are ``roa_van_der_pol``, ``roa_inverted_pendulum``,
-    ``roa_unicycle_obstacle``, ``roa_consensus``; ``.gitignore`` ignores
-    ``docs/figures/`` except for those four.
-    """
-    raise NotImplementedError
+    """Save to ``docs/figures/<name>.png`` (default) and return the path."""
+    if directory is None:
+        directory = Path(__file__).resolve().parents[2] / "docs" / "figures"
+    else:
+        directory = Path(directory)
+    directory.mkdir(parents=True, exist_ok=True)
+    path = directory / f"{name}.png"
+    fig.savefig(path, dpi=dpi, bbox_inches="tight")
+    return path

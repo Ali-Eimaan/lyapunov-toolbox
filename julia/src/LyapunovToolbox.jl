@@ -60,6 +60,12 @@ using SemialgebraicSets
 using SumOfSquares
 using JuMP
 
+import Clarabel  # default interior-point solver, see default_solver()
+
+# JuMP re-exports MathOptInterface's module binding; alias it so solver status
+# comparisons read as MOI.OPTIMAL instead of JuMP.MOI.OPTIMAL everywhere.
+const MOI = JuMP.MOI
+
 # Order matters: polynomial_utils defines the primitives the rest use, systems
 # defines the plants, sos_lyapunov the programs, roa_estimation the outer loops.
 include("polynomial_utils.jl")

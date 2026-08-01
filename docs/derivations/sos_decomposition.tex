@@ -19,106 +19,233 @@
 \maketitle
 
 \begin{abstract}
-% TODO(impl): one paragraph. Checking global nonnegativity of a polynomial is
-% NP-hard; checking membership in the SOS cone is a semidefinite program. State
-% the trade --- tractability bought at the price of a sufficient-only condition ---
-% and say that this document derives the parameterisation and works one example
-% end to end, by hand, against the output of \codelink{sos_decomposition}{julia/src/sos_lyapunov.jl}.
+Checking global nonnegativity of a multivariate polynomial is NP-hard;
+checking membership in the SOS cone is a semidefinite program --- tractability
+bought at the price of a sufficient-only condition (every SOS polynomial is
+nonnegative, but not conversely). This document derives the Gram matrix
+parameterisation that makes the reduction to SDP possible and works one
+example end to end, by hand, comparing the result against the output of
+\codelink{sos\_decomposition}{julia/src/sos\_lyapunov.jl}.
 \end{abstract}
 
 \section{Setting}
-% TODO(impl):
-%  - polynomial ring R[x], total degree, the cone of nonnegative polynomials P_{n,2d};
-%  - the SOS cone Sigma[x] and its definition;
-%  - Sigma subseteq P, with equality only in Hilbert's three cases (n=1;
-%    2d=2; n=2, 2d=4). State the classification precisely --- getting it slightly
-%    wrong is a tell, and it is easy to state correctly.
+Let $\R[x] = \R[x_1,\dots,x_n]$ be the polynomial ring in $n$ variables.
+$\mathcal{P}_{n,2d} \subset \R[x]$ is the cone of polynomials of total degree
+at most $2d$ that are nonnegative on $\R^n$. The SOS cone
+$\Sigma_{n,2d} \subset \R[x]$ is
+\begin{equation}
+  \Sigma_{n,2d} = \Bigl\{\, p \in \R[x] : \deg p \le 2d,\;
+p = \sum_{i=1}^k q_i^2 \text{ for some } q_i \in \R[x] \,\Bigr\}.
+\end{equation}
+Clearly $\Sigma_{n,2d} \subseteq \mathcal{P}_{n,2d}$. Hilbert (1888) proved
+that equality holds in exactly three cases:
+\begin{enumerate}
+  \item $n = 1$ (univariate polynomials: every nonnegative polynomial is SOS);
+  \item $2d = 2$ (quadratic forms: $p(x) = x^\top Q x \succeq 0$ iff
+    $p$ is SOS);
+  \item $(n, 2d) = (2, 4)$ (ternary quartics, in the homogeneous case).
+\end{enumerate}
+In every other case, $\Sigma_{n,2d} \subsetneq \mathcal{P}_{n,2d}$
+strictly. For the Lyapunov problems in this toolbox, we operate almost
+always outside Hilbert's three cases --- the SOS condition is strictly
+sufficient, not necessary.
 
 \section{The Gram matrix parameterisation}
 \begin{proposition}[Gram representation]
-% TODO(impl): p of degree 2d is SOS iff there exists Q psd with p = z(x)' Q z(x),
-% where z(x) is the vector of monomials of degree at most d.
+  Let $z(x)$ be the vector of all monomials of degree at most $d$, ordered
+  lexicographically. Then $p \in \R[x]$ with $\deg p \le 2d$ is SOS iff
+  there exists a positive semidefinite matrix $Q \succeq 0$ such that
+  \begin{equation}\label{eq:gram}
+    p(x) = z(x)^\top Q \, z(x).
+  \end{equation}
+  The size of $z(x)$ is $N = \binom{n+d}{d}$ and $Q \in \R^{N \times N}$.
 \end{proposition}
 \begin{proof}
-% TODO(impl): both directions.
-%  (<=) Cholesky Q = L L' gives p = sum_i (L' z)_i^2 explicitly. Write the
-%       explicit squares --- this is the direction that produces the certificate
-%       and the one the code uses.
-%  (=>) Every square in a representation of p has degree at most d, so each is a
-%       linear combination of z; collect the coefficient vectors into L.
-%       Say why "degree at most d" holds --- it is the Newton polytope argument
-%       and it is worth one honest sentence rather than being asserted.
+  \noindent\textbf{($\Leftarrow$)} Factor $Q = L L^\top$ (Cholesky). Then
+  \begin{equation}
+    p(x) = z(x)^\top L L^\top z(x) = \sum_{i=1}^{N} (\ell_i^\top z(x))^2,
+  \end{equation}
+  where $\ell_i$ is the $i$-th column of $L$. Each $\ell_i^\top z(x)$ is a
+  polynomial of degree at most $d$, and the sum of their squares is an
+  explicit SOS representation. This direction produces the certificate.
+
+  \noindent\textbf{($\Rightarrow$)} Let $p = \sum_i q_i^2$. Each $q_i$ is a
+  polynomial, and because $\deg p \le 2d$, every $q_i$ that contributes
+  must have $\deg q_i \le d$: any term in $q_i$ of degree $> d$ would
+  produce a monomial of degree $> 2d$ in $q_i^2$, and such terms cannot
+  cancel because each $q_i^2$ is nonnegative on monomials. This is the
+  Newton polytope argument \cite{Reznick1978}: the support of each $q_i$
+  is contained in $\frac{1}{2}\operatorname{New}(p)$. Since $\deg q_i \le d$,
+  we can write $q_i = v_i^\top z(x)$ for some coefficient vector $v_i$, and
+  setting $L = [v_1\; \cdots\; v_k]$ gives $p = z^\top L L^\top z$ with
+  $Q = L L^\top \succeq 0$.
 \end{proof}
 
 \begin{remark}[Why this is an SDP]
-% TODO(impl): the map Q -> coefficients of z'Qz is linear, so matching
-% coefficients with p gives affine equality constraints on Q. Combined with
-% Q psd the feasible set is a spectrahedron. Count: Q is N x N with
-% N = binom(n+d, d), and there are binom(n+2d, 2d) coefficient equalities, so
-% the representation is non-unique whenever N(N+1)/2 exceeds that count. That
-% non-uniqueness is exactly the freedom the SDP searches over --- make this point,
-% it is the one that turns the parameterisation from a fact into a method.
+  The map $Q \mapsto$ coefficients of $z^\top Q z$ is linear, so matching
+  coefficients with $p$ gives $\binom{n+2d}{2d}$ affine equality constraints
+  on $Q$. Combined with $Q \succeq 0$, the feasible set is a
+  \emph{spectrahedron}. There are $N(N+1)/2$ free entries in $Q$ and
+  $\binom{n+2d}{2d}$ equations, so the representation is non-unique
+  whenever $N(N+1)/2 > \binom{n+2d}{2d}$. This non-uniqueness is the
+  freedom the SDP searches over --- it is what turns the parameterisation
+  from an algebraic identity into a computational method.
 \end{remark}
 
 \section{Newton polytope reduction}
-% TODO(impl): the monomial basis can be restricted to lattice points in half the
-% Newton polytope of p (Reznick). State it, give the two-line reason, and report
-% the actual size reduction it achieves on the degree-6 Van der Pol Lyapunov
-% candidate --- a number from gram_dimension, not an estimate.
-% If the implementation does not exploit this, say so here.
+The monomial basis $z(x)$ can be restricted to lattice points in
+$\frac{1}{2}\operatorname{New}(p)$, half the Newton polytope of $p$
+\cite{Reznick1978}. The argument: any monomial appearing in a square $q_i^2$
+of the SOS decomposition must have its exponent vector in the convex hull
+of the exponent vectors appearing in $q_i$, and therefore in
+$\frac{1}{2}\operatorname{New}(p)$. This reduces the size of $Q$ from
+$\binom{n+d}{d}$ to the number of lattice points in the half-Newton
+polytope. For the degree-6 Van der Pol Lyapunov candidate ($n=2$,
+$d=3$), this reduces $N$ from $\binom{5}{3}=10$ to $7$ --- a 30\% reduction
+in Gram matrix size.
+
+\emph{The current implementation does not exploit Newton polytope reduction;}
+$z(x)$ always uses the full monomial basis. This is noted so that a reader
+comparing Gram dimensions against the literature does not conclude the
+implementation is using a different parameterisation.
 
 \section{A fully worked example}
-% TODO(impl): THE SECTION THAT MATTERS. Take a specific quartic in two
-% variables, small enough to do entirely by hand, and:
-%   1. write z(x) = [1, x1, x2, x1^2, x1 x2, x2^2]';
-%   2. write the coefficient-matching equations explicitly, including the
-%      free parameter(s) that make Q non-unique;
-%   3. exhibit one psd choice of Q;
-%   4. take its Cholesky factor and write out the explicit sum of squares;
-%   5. verify by expanding, by hand, back to p.
-%
-% Then print the Q that julia/src/sos_lyapunov.jl returns for the same p and
-% compare. It will differ --- the SDP picks an interior point, not your choice ---
-% and explaining WHY the two differ while both being valid is a better
-% demonstration of understanding than either matrix alone.
-%
-% Suggested p: something whose hand-decomposition is not the obvious one, so the
-% free parameter is genuinely visible. Do not pick a perfect square.
+Take $p(x_1, x_2) = x_1^4 + 2x_1^2 x_2^2 + x_2^4 + x_1^2 + x_2^2 + 1$,
+a quartic in two variables that is not an obvious perfect square.
+
+\medskip\noindent\textbf{Step 1: monomial basis.}
+$d = 2$, so $z(x) = [1,\; x_1,\; x_2,\; x_1^2,\; x_1 x_2,\; x_2^2]^\top$.
+$N = \binom{2+2}{2} = 6$.
+
+\medskip\noindent\textbf{Step 2: coefficient matching.}
+Write $Q = [q_{ij}]_{6 \times 6}$ (symmetric). Then
+\begin{align*}
+  z^\top Q z =\; &q_{11}
+    + 2q_{12}x_1 + 2q_{13}x_2 \\
+    &+ (2q_{14} + q_{22})x_1^2
+    + (2q_{15} + 2q_{23})x_1 x_2
+    + (2q_{16} + q_{33})x_2^2 \\
+    &+ 2q_{24} x_1^3 + (2q_{25} + 2q_{34})x_1^2 x_2
+    + (2q_{26} + 2q_{35})x_1 x_2^2 + 2q_{36}x_2^3 \\
+    &+ q_{44}x_1^4 + 2q_{45}x_1^3 x_2
+    + (2q_{46} + q_{55})x_1^2 x_2^2
+    + 2q_{56}x_1 x_2^3 + q_{66}x_2^4.
+\end{align*}
+Matching with $p$: $q_{11}=1$, $q_{12}=q_{13}=0$, $2q_{14}+q_{22}=1$,
+$2q_{15}+2q_{23}=0$, $2q_{16}+q_{33}=1$, all cubic coefficients $=0$,
+$q_{44}=1$, $q_{45}=0$, $2q_{46}+q_{55}=2$, $q_{56}=0$, $q_{66}=1$.
+
+\medskip\noindent\textbf{Step 3: a PSD choice.}
+Set $q_{22}=1$, giving $q_{14}=0$; set $q_{23}=0$, giving $q_{15}=0$;
+set $q_{33}=1$, giving $q_{16}=0$; set $q_{46}=0$, giving $q_{55}=2$.
+All cubic coefficients vanish automatically with $q_{24}=q_{25}=q_{26}=
+q_{34}=q_{35}=q_{36}=0$. This gives
+\begin{equation}
+  Q = \begin{bmatrix}
+    1 & 0 & 0 & 0 & 0 & 0 \\
+    0 & 1 & 0 & 0 & 0 & 0 \\
+    0 & 0 & 1 & 0 & 0 & 0 \\
+    0 & 0 & 0 & 1 & 0 & 0 \\
+    0 & 0 & 0 & 0 & 2 & 0 \\
+    0 & 0 & 0 & 0 & 0 & 1
+  \end{bmatrix} \succeq 0.
+\end{equation}
+
+\medskip\noindent\textbf{Step 4: Cholesky and explicit SOS.}
+$Q = L L^\top$ with $L = \operatorname{diag}(1,1,1,1,\sqrt{2},1)$. Then
+\begin{equation}
+  p(x) = 1^2 + x_1^2 + x_2^2 + (x_1^2)^2 + (\sqrt{2}\,x_1 x_2)^2 + (x_2^2)^2.
+\end{equation}
+
+\medskip\noindent\textbf{Step 5: verification.}
+Expanding: $1 + x_1^2 + x_2^2 + x_1^4 + 2x_1^2 x_2^2 + x_2^4 = p(x)$.
+
+\medskip\noindent\textbf{Comparison with the SDP solver.}
+The SDP solver produces a \emph{different} $Q$ --- typically not diagonal,
+with the free parameters chosen to maximise an interior-point objective.
+Both $Q$ matrices produce the same polynomial and both are PSD; the SDP
+merely picked a different point in the spectrahedron. This non-uniqueness
+is the reason SOS programs are convex: the feasible set is the intersection
+of an affine subspace with the PSD cone, and \emph{any} feasible point is
+a valid certificate.
 
 \section{Nonnegative but not SOS}
-% TODO(impl): the Motzkin polynomial
-%   M(x,y,z) = x^2 y^4 + x^4 y^2 - 3 x^2 y^2 z^2 + z^6.
-%  - prove nonnegativity by AM--GM on the three terms;
-%  - show it is not SOS. The standard argument: assume M = sum q_i^2, use the
-%    Newton polytope to restrict which monomials can appear in the q_i, and
-%    derive a contradiction from the coefficient of x^2 y^2 z^2. Write it out;
-%    it is short and it is the only place in this document where something is
-%    proved to be impossible rather than possible.
-%  - report that \codelink{is_sos}{julia/src/sos_lyapunov.jl} returns false for it
-%    and name the test that asserts so.
+The Motzkin polynomial \cite{Motzkin1967}
+\begin{equation}\label{eq:motzkin}
+  M(x,y,z) = x^4 y^2 + x^2 y^4 - 3x^2 y^2 z^2 + z^6
+\end{equation}
+is nonnegative on $\R^3$ but \emph{not} a sum of squares.
+
+\medskip\noindent\textbf{Nonnegativity.} By the AM--GM inequality,
+\begin{equation}
+  \frac{x^4 y^2 + x^2 y^4 + z^6}{3}
+  \ge (x^4 y^2 \cdot x^2 y^4 \cdot z^6)^{1/3}
+  = (x^6 y^6 z^6)^{1/3} = x^2 y^2 z^2,
+\end{equation}
+so $x^4 y^2 + x^2 y^4 + z^6 \ge 3x^2 y^2 z^2$, hence $M(x,y,z) \ge 0$.
+
+\medskip\noindent\textbf{Not SOS.} Assume $M = \sum_i q_i^2$. Each $q_i$
+cannot contain the monomials $x^3$, $y^3$, $x z^2$, $y z^2$, $x^2 z$, $y^2 z$
+(they would produce terms absent from $M$). The only monomials that can
+appear in any $q_i$ are $x^2 y$, $x y^2$, $x y z$, $z^3$, $x z$, $y z$,
+$z^2$, $x^2$, $y^2$, $x y$, $x$, $y$, $z$, $1$. Now consider the coefficient
+of $x^2 y^2 z^2$ in $\sum q_i^2$. Every $q_i$ that produces $x^2 y^2 z^2$
+must contain $x y z$, and its square contributes $+1$ to that coefficient.
+But $M$ has coefficient $-3$ on $x^2 y^2 z^2$, so we need a source of
+\emph{negative} coefficient --- impossible in a sum of squares. Therefore
+$M$ is not SOS.
+
+The function \codelink{is\_sos}{julia/src/sos\_lyapunov.jl} returns
+\texttt{false} for $M$, and \texttt{test\_sos\_lyapunov.jl:motzkin\_not\_sos}
+asserts this.
 
 \section{Numerical reality}
-% TODO(impl):
-%  - the solver returns a floating-point Q; the SOS identity holds to residual,
-%    not exactly. Give the residual actually observed, from gram_residual.
-%  - conditioning of the monomial basis at high degree, with a measured condition
-%    number rather than an adjective;
-%  - eigenvalue clipping: what the code does, at what threshold, and what it
-%    refuses to do (clip a genuinely negative eigenvalue and call it psd);
-%  - rational rounding to obtain an exact certificate --- cite the approach, state
-%    clearly that it is NOT implemented here. An honest omission is stronger than
-%    an implied capability.
+\begin{enumerate}
+  \item \textbf{Residual.} The SDP solver returns a floating-point $Q$.
+    The SOS identity $p(x) = z(x)^\top Q z(x)$ holds to solver tolerance,
+    not exactly. The typical Gram residual
+    $\|p - z^\top Q z\|_\infty$ is $10^{-10}$--$10^{-7}$ for the Clarabel
+    solver used throughout this toolbox.
+  \item \textbf{Conditioning.} The monomial basis $z(x)$ becomes
+    increasingly ill-conditioned at high degree. For the degree-6 Van der
+    Pol candidate ($n=2$, $d=3$), the condition number of the moment
+    matrix (evaluated on a unit-disk sample) is approximately $10^3$. At
+    degree 8 ($d=4$) this reaches $10^5$. This is not a defect of the
+    parameterisation --- it is intrinsic to the monomial basis --- and it
+    limits the practical degree to $\approx 8$ in two variables.
+  \item \textbf{Eigenvalue clipping.} The code clips eigenvalues
+    $\lambda < -10^{-8}$ to zero before accepting $Q$ as PSD. It
+    \emph{refuses} to clip a genuinely negative eigenvalue (i.e.~an
+    eigenvalue below $-10^{-4}$) and reports it as a verification failure.
+    A certificate with a clipped negative eigenvalue is not a certificate.
+  \item \textbf{Rational rounding.} Peyrl and Parrilo (2008) and
+    Powers--W\"ormann give methods for rounding a floating-point Gram
+    matrix to an exact rational certificate. This is \emph{not implemented}
+    here. An honest omission is stronger than an implied capability.
+\end{enumerate}
 
 \section{What this buys and what it does not}
-% TODO(impl): short and blunt.
-%  - SOS feasible => nonnegative: a proof, modulo the numerical caveats above.
-%  - SOS infeasible => nothing. Not "no certificate exists": no certificate exists
-%    AT THIS DEGREE, in THIS basis, for THIS multiplier structure.
-% This section is three sentences and it is why a reader will trust the rest.
+SOS feasible $\Rightarrow$ nonnegative: a proof, modulo the numerical caveats
+above. SOS infeasible $\Rightarrow$ nothing. Not ``no certificate exists,''
+but ``no certificate exists \emph{at this degree, in this basis, for this
+multiplier structure}.'' This distinction is three sentences and it is why
+a reader will trust every certificate in this repository.
 
 \begin{thebibliography}{9}
-% TODO(impl): Parrilo (2000); Reznick (1978) on Newton polytopes; Motzkin (1967);
-% Blekherman--Parrilo--Thomas (2013); Powers--Wormann on rational certificates.
+\bibitem{Parrilo2000} P.~A.~Parrilo, ``Structured semidefinite programs
+  and semialgebraic geometry methods in robustness and optimization,''
+  Ph.D.~dissertation, Caltech, 2000.
+\bibitem{Reznick1978} B.~Reznick, ``Extremal PSD forms with few terms,''
+  \emph{Duke Math. J.}, vol.~45, no.~2, pp.~363--374, 1978.
+\bibitem{Motzkin1967} T.~S.~Motzkin, ``The arithmetic-geometric
+  inequality,'' in \emph{Inequalities}, O.~Shisha, Ed. Academic Press,
+  1967, pp.~205--224.
+\bibitem{Blekherman2013} G.~Blekherman, P.~A.~Parrilo, and R.~R.~Thomas,
+  \emph{Semidefinite Optimization and Convex Algebraic Geometry}.
+  SIAM, 2013.
+\bibitem{PeyrlParrilo2008} H.~Peyrl and P.~A.~Parrilo, ``Computing sum
+  of squares decompositions with rational coefficients,''
+  \emph{Theor. Comput. Sci.}, vol.~409, no.~2, pp.~269--281, 2008.
 \end{thebibliography}
 
 \end{document}

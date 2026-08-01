@@ -51,18 +51,21 @@ __all__ = [
     "save_figure",
 ]
 
-# TODO(impl): re-export the names above once the modules are implemented, e.g.
-#   from lyapunov_toolbox.julia_bridge import (
-#       JuliaBackendError, JuliaSession, RoaCertificate, certify_roa,
-#       julia_available, load_certificate, synthesize,
-#   )
-#   from lyapunov_toolbox.plotting import (
-#       plot_phase_portrait, plot_roa_2d, plot_roa_comparison,
-#       plot_vdot_field, plot_vs_convergence, save_figure, use_style,
-#   )
-#
-# Import `plotting` eagerly but keep `julia_bridge`'s Julia startup lazy: merely
-# importing this package must not spend ten seconds booting a Julia runtime.
-# Verify the re-export block is complete with
-#   python -c "import lyapunov_toolbox as m; print(sorted(set(m.__all__) - set(dir(m))))"
-# which must print an empty list.
+from lyapunov_toolbox.julia_bridge import (
+    JuliaBackendError,
+    JuliaSession,
+    RoaCertificate,
+    certify_roa,
+    julia_available,
+    load_certificate,
+    synthesize,
+)
+from lyapunov_toolbox.plotting import (
+    plot_phase_portrait,
+    plot_roa_2d,
+    plot_roa_comparison,
+    plot_vdot_field,
+    plot_vs_convergence,
+    save_figure,
+    use_style,
+)
