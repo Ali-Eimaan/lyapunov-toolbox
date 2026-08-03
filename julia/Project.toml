@@ -1,7 +1,7 @@
 name = "LyapunovToolbox"
 uuid = "3f9d1c7a-6b2e-4d58-9a41-0c7e5b8f2d10"
 version = "0.1.0"
-authors = ["Ali-Eimaan"]
+authors = ["Ali-Eiman"]
 
 [deps]
 Clarabel = "61c947e1-3e6d-4ee4-985a-eec8c727bd6e"

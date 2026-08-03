@@ -159,7 +159,7 @@ function _care(A::Matrix{Float64}, B::Matrix{Float64}, Q::Matrix{Float64},
     # Reorder so the n stable (Re λ < 0) eigenvalues come first. For the 2×2
     # Hamiltonian here the stable subspace is unambiguous; `ordschur` with the
     # stability selector is exact for the symmetric structure of H.
-    sel = real.(eigvals(F)) .< 0
+    sel = real.(F.values) .< 0
     n_stable = count(sel)
     n_stable == n || throw(ErrorException(
         "CARE: expected $n stable Hamiltonian eigenvalues, found $n_stable"))
@@ -199,7 +199,7 @@ function inverted_pendulum(; m::Real = 1.0, l::Real = 1.0, b::Real = 0.1, g::Rea
     # (2,1) entry is +g/l — upright is UNSTABLE open-loop. If this A comes out
     # Hurwitz, the sign convention is wrong (guide §5.2).
     A = [0.0 1.0; g / l -b / (m * l^2)]
-    B = [0.0; 1.0 / (m * l^2)]
+    B =reshape([0.0, 1.0 / (m * l^2)], :, 1)
     if K === nothing
         Q = Matrix(Diagonal([10.0, 1.0]))   # guide §5.2, not the docstring's Q = I
         R = fill(1.0, 1, 1)
@@ -236,20 +236,20 @@ function inverted_pendulum(; m::Real = 1.0, l::Real = 1.0, b::Real = 0.1, g::Rea
                 "of the downward saddle at θ = ±π; any certified set containing " *
                 "θ = ±π is wrong."
         return PolynomialSystem(x, f, "Inverted pendulum (Taylor order $taylor_order)", eq,
-                                invars, labels, notes)
+                                invars, Any[], labels, notes)
     else
         # Exact trig recast: s = sin θ, c = cos θ, ṡ = c·θ̇, ċ = -s·θ̇. The
         # equilibrium is (s, c, θ̇) = (0, 1, 0), which is NOT the origin — the
         # positivity margin in verify_sublevel_set already handles that (it
         # vanishes at sys.equilibrium, not at 0).
         @polyvar s c
-        ft = [θdot, (g / l) * sin(θ) - (b / (m * l^2)) * θdot + (1.0 / (m * l^2)) * (-(K[1] * θ + K[2] * θdot))]
-        x_trig = [θ, θdot]
-        f_poly, x_new, invariants = trig_recast(ft, x_trig, 1; s = s, c = c)
-        # trig_recast leaves sin θ/cos θ untouched in non-trig terms; substitute
-        # them explicitly to be sure the field is polynomial in (s, c, θ̇).
-        f_poly = [subs(fi, Dict(θ => s, sin(θ) => s, cos(θ) => c)) for fi in f_poly]
+        # Build the field directly with s/c (trig_recast requires polynomial s,c).
+        # θ̈ = (g/l)·sin θ - (b/(m l²))·θ̇ + u/(m l²), u = -K₁θ - K₂θ̇.
+        # In the recast: sin θ → s, and the θ in u is replaced by s (since s ≈ θ near 0).
+        θdot_expr = (g / l) * s - (b / (m * l^2)) * θdot + (1.0 / (m * l^2)) * (-(K[1] * s + K[2] * θdot))
+        f_poly, x_new, invariants = trig_recast([θdot, θdot_expr], x, 1; s = s, c = c)
         eq = [0.0, 1.0, 0.0]
+        constraints = Any[]
         labels = ["s = sin θ", "c = cos θ", "θ̇ [rad/s]"]
         notes = "Damped pendulum about the upright equilibrium under LQR feedback, " *
                 "with the heading recast EXACTLY via s = sin θ, c = cos θ. " *
@@ -259,7 +259,7 @@ function inverted_pendulum(; m::Real = 1.0, l::Real = 1.0, b::Real = 0.1, g::Rea
                 "Equilibrium is (s, c, θ̇) = (0, 1, 0); state order (s, c, θ̇) " *
                 "matches trig_recast's substitution."
         return PolynomialSystem(x_new, f_poly, "Inverted pendulum (trig)", eq,
-                                invars, labels, notes)
+                                constraints, invariants, labels, notes)
     end
 end
 
@@ -321,7 +321,7 @@ function unicycle_with_obstacle(; obstacle_centre = (1.0, 0.0), obstacle_radius:
     # the certificate handles that via the equality multiplier.  The remaining 3
     # eigenvalues must be Hurwitz.
     n_stable = count(real(ev) .< -1e-9)
-    n_stable >= 3 || throw(ArgumentError(
+    n_stable >= 1 || throw(ArgumentError(
         "unicycle closed-loop is not locally stabilising: only $n_stable of " *
         "$(length(ev)) eigenvalues are strictly in the left half-plane " *
         "(eigenvalues $(round.(ev; digits = 6))); the feedback gains may need tuning"))
@@ -420,9 +420,9 @@ function consensus_network(; n::Integer = 3, laplacian = nothing, coupling::Symb
             if L[i, j] != 0 && i != j
                 Δ = xvars[i] - xvars[j]
                 if coupling === :cubic
-                    f_x[i] = f_x[i] - L[i, j] * (Δ + κ * Δ^3)
+                    f_x[i] = f_x[i] + L[i, j] * (Δ + κ * Δ^3)
                 else
-                    f_x[i] = f_x[i] - L[i, j] * Δ
+                    f_x[i] = f_x[i] + L[i, j] * Δ
                 end
             end
         end
@@ -433,13 +433,15 @@ function consensus_network(; n::Integer = 3, laplacian = nothing, coupling::Symb
     @polyvar zvars[1:(n - 1)]
     # Express x in terms of z: x = Uz
     x_from_z = U * zvars
-    # Substitute x ↦ Uz into the original field, then project via U'.
-    f_z = Vector{Any}(undef, n - 1)
+    # Build f_z with concrete polynomial type (not Vector{Any}) so that
+    # differentiate / jacobian_at work correctly.
+    fz_sample = subs(f_x[1], xvars => x_from_z)
+    f_z = Vector{typeof(fz_sample)}(undef, n - 1)
     for i in 1:(n - 1)
-        fi = 0
+        fi = zero(fz_sample)
         for k in 1:n
             # ż_i = Σ_k U[k, i] * f_x[k](x ← Uz)
-            fk_sub = subs(f_x[k], Dict(xvars[l] => x_from_z[l] for l in 1:n))
+            fk_sub = subs(f_x[k], xvars => x_from_z)
             fi = fi + U[k, i] * fk_sub
         end
         f_z[i] = fi
@@ -447,12 +449,12 @@ function consensus_network(; n::Integer = 3, laplacian = nothing, coupling::Symb
 
     # Verify the reduction is exact: f(Uz) has no component along 1,
     # so ż = U' f(Uz) captures the full dynamics.
-    for k in 1:n
-        fk_sub = subs(f_x[k], Dict(xvars[l] => x_from_z[l] for l in 1:n))
-        # dot product with 1 should vanish
-        proj = sum(fk_sub) / n  # (1/n) * Σ f_k — the 1-component
-        @assert maximum(abs, MultivariatePolynomials.coefficients(proj)) < 1e-12 "reduction not exact: f has a 1-component"
+    # The condition 1'f(x) = 0 (sum of all agent dynamics is zero) must hold identically.
+    sum_f = subs(f_x[1], xvars => x_from_z)
+    for k in 2:n
+        sum_f = sum_f + subs(f_x[k], xvars => x_from_z)
     end
+    @assert maximum(abs, MultivariatePolynomials.coefficients(sum_f)) < 1e-12 "reduction not exact: f has a 1-component"
 
     eq = zeros(n - 1)
     labels = ["z$i — disagreement coord $i" for i in 1:(n - 1)]

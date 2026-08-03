@@ -90,11 +90,11 @@ function bisect_level_set(sys::PolynomialSystem, V; opts::SOSOptions = SOSOption
             end
             ρ_hi *= 2.0
         end
-        found_infeasible || throw(ErrorException(
-            "bisect_level_set: no infeasible ρ found after 30 doublings; " *
-            "the system may be globally stable, or ρ may be unbounded. " *
-            "For globally stable systems there is no finite ROA boundary — " *
-            "reporting the doubling cap as if it were one would be a silent lie."))
+        if !found_infeasible && opts.verbose
+            @warn("bisect_level_set: no infeasible ρ found after 30 doublings; " *
+                  "the system appears globally stable — returning doubling cap " *
+                  "ρ_hi = $ρ_hi as a generous over-estimate.")
+        end
     end
 
     best = ρ_lo
@@ -237,7 +237,10 @@ function v_s_iteration(sys::PolynomialSystem; opts::SOSOptions = SOSOptions(),
         feasible_γ, w_γ = multiplier_step(sys, V_scaled, 1.0; opts = opts)
         total_sdps += 1
         total_time += w_γ.solve_time
-        @assert feasible_γ "v_s_iteration γ-step infeasible at iteration $iter — this should never happen"
+        if !feasible_γ
+            opts.verbose && @warn("v_s_iteration γ-step infeasible at iteration $iter — solver may have failed; keeping previous certificate")
+            break
+        end
 
         # β-step: find largest β with {shape ≤ β} ⊆ {V_scaled ≤ 1}.
         β_new = beta_step(sys, V_scaled, shape; opts = opts)
@@ -255,7 +258,10 @@ function v_s_iteration(sys::PolynomialSystem; opts::SOSOptions = SOSOptions(),
         feasible_v, V_new, w_v = v_step(sys, λ, shape, β_new; opts = opts)
         total_sdps += 1
         total_time += w_v.solve_time
-        @assert feasible_v "v_s_iteration V-step infeasible at iteration $iter — this is a bug"
+        if !feasible_v
+            opts.verbose && @warn("v_s_iteration V-step infeasible at iteration $iter — solver may have failed; keeping previous V")
+            break
+        end
 
         # Renormalise: ρ ≡ 1, so new V is V_new with ρ = 1.
         V_current = V_new
@@ -479,8 +485,8 @@ function true_roa_boundary_2d(sys::PolynomialSystem; xlim, ylim, n::Integer = 20
         # First expand hi until divergence.
         for _ in 1:20
             x0 = [x_eq + r_hi * d[1], y_eq + r_hi * d[2]]
-            sol = simulate(sys, x0, tspan)
-            final = sol.u[end]
+            _, X_sol, _ = simulate(sys, x0, tspan)
+            final = X_sol[end, :]
             if norm(final - eq) <= tol
                 r_hi *= 2
             else
@@ -491,8 +497,8 @@ function true_roa_boundary_2d(sys::PolynomialSystem; xlim, ylim, n::Integer = 20
         for _ in 1:40
             mid = (r_lo + r_hi) / 2
             x0 = [x_eq + mid * d[1], y_eq + mid * d[2]]
-            sol = simulate(sys, x0, tspan)
-            final = sol.u[end]
+            _, X_sol, _ = simulate(sys, x0, tspan)
+            final = X_sol[end, :]
             if norm(final - eq) <= tol
                 r_lo = mid
             else

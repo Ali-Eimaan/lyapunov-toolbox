@@ -13,7 +13,7 @@ description = "Python front end for SOS Lyapunov synthesis and region-of-attract
 # full text is in ../LICENSE.
 license = { text = "MIT" }
 requires-python = ">=3.10"
-authors = [{ name = "Ali-Eimaan" }]
+authors = [{ name = "Ali-Eiman" }]
 keywords = ["lyapunov", "sum-of-squares", "region-of-attraction", "control-theory", "robotics"]
 classifiers = [
     "Development Status :: 3 - Alpha",
@@ -50,8 +50,8 @@ dev = [
 ]
 
 [project.urls]
-Homepage = "https://github.com/Ali-Eimaan/lyapunov-toolbox"
-Repository = "https://github.com/Ali-Eimaan/lyapunov-toolbox"
+Homepage = "https://github.com/Ali-Eiman/lyapunov-toolbox"
+Repository = "https://github.com/Ali-Eiman/lyapunov-toolbox"
 
 [tool.setuptools.packages.find]
 where = ["."]

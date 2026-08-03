@@ -109,11 +109,12 @@ function jacobian_at(f::AbstractVector, x::AbstractVector, x0::AbstractVector = 
         "length(f) = $(length(f)) != length(x) = $(length(x))"))
     length(x0) == length(x) || throw(ArgumentError(
         "length(x0) = $(length(x0)) != length(x) = $(length(x))"))
-    J = differentiate(f, x)  # Matrix{<:Polynomial}: J[i, j] = ∂f[i]/∂x[j]
     n = length(x)
     A = Matrix{Float64}(undef, n, n)
     for i in 1:n, j in 1:n
-        A[i, j] = convert(Float64, J[i, j](x => x0))
+        # differentiate each component individually (works with Any-typed vectors).
+        dfi_dxj = differentiate(f[i], x[j])
+        A[i, j] = convert(Float64, dfi_dxj(x => x0))
     end
     return A
 end

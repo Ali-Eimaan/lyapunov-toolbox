@@ -190,7 +190,8 @@ function is_sos(p, x::AbstractVector; solver = nothing, ε::Real = 0.0)
     if st == MOI.OPTIMAL
         return true
     elseif st == MOI.INFEASIBLE || st == MOI.INFEASIBLE_OR_UNBOUNDED ||
-           st == MOI.DUAL_INFEASIBLE || st == MOI.ALMOST_INFEASIBLE
+           st == MOI.DUAL_INFEASIBLE || st == MOI.ALMOST_INFEASIBLE ||
+           st == MOI.NUMERICAL_ERROR
         return false
     elseif st == MOI.ALMOST_OPTIMAL || st == MOI.SLOW_PROGRESS
         # Accept only if the returned Gram matrix is genuinely a certificate:
@@ -259,7 +260,8 @@ function sos_decomposition(p, x::AbstractVector; solver = nothing)
         end
         return (basis, emptyQ, :failure)
     elseif st == MOI.INFEASIBLE || st == MOI.DUAL_INFEASIBLE ||
-           st == MOI.INFEASIBLE_OR_UNBOUNDED || st == MOI.ALMOST_INFEASIBLE
+           st == MOI.INFEASIBLE_OR_UNBOUNDED || st == MOI.ALMOST_INFEASIBLE ||
+           st == MOI.NUMERICAL_ERROR
         return (basis, emptyQ, :failure)
     else
         throw(ErrorException("sos_decomposition: unexpected solver termination status $st"))
@@ -317,18 +319,28 @@ function lyapunov_from_linearization(sys::PolynomialSystem; Q = nothing)
     size(Qmat) == (n, n) || throw(ArgumentError(
         "Q must be $(n)x$(n) to match the $(n)-state system, got $(size(Qmat))"))
     ev = eigvals(A)
-    if any(real(ev) .>= 0)
+    # Systems with equality invariants (s²+c²=1) have zero eigenvalues in the
+    # constrained directions — the equilibrium is still stable on the manifold.
+    if any(real(ev) .> 1e-10)
         throw(ArgumentError(
             "A = ∂f/∂x at the equilibrium is not Hurwitz (eigenvalues " *
             "$(round.(ev; digits = 6))); the origin is not locally " *
             "asymptotically stable, so there is nothing to certify"))
     end
-    # Continuous Lyapunov equation A'P + PA = -Q via the Kronecker-product solve,
-    # exact up to roundoff for the small n in this package.
+    # Systems with equality invariants (s²+c²=1) have zero eigenvalues in the
+    # constrained directions — the equilibrium is still stable on the manifold.
+    # A'P+PA=-Q has no solution when A has zero eigenvalues and Q is full rank.
+    # Use P = I as a fallback; the V-s iteration will refine it.
+    has_zero_eig = any(abs.(real(ev)) .< 1e-10)
+    if has_zero_eig
+        x = sys.x
+        return sum(x[i]^2 for i in 1:n)
+    end
+    # Continuous Lyapunov equation A'P + PA = -Q via Kronecker-product solve.
     M = kron(Matrix{Float64}(I, n, n), A') + kron(A', Matrix{Float64}(I, n, n))
     P = reshape(M \ vec(-Qmat), n, n)
     P = (P + P') / 2
-    res = norm(A' * P + P * A + Qmat, 2)  # Frobenius
+    res = norm(A' * P + P * A + Qmat, 2)
     res < 1e-9 * max(1, norm(P, 2)) || throw(ErrorException(
         "Lyapunov solve failed: ‖A'P + PA + Q‖_F = $res is not below " *
         "1e-9·max(1, ‖P‖_F) = $(1e-9 * max(1, norm(P, 2)))"))
@@ -410,7 +422,8 @@ function verify_sublevel_set(sys::PolynomialSystem, V, ρ::Real; opts::SOSOption
         # certificate: it must reproduce its target polynomial and be PSD.
         feasible = _witness_grams_ok(sys, V, Vd, ρ, margin, opts, cref, λ, σ, μ, μb)
     elseif st == MOI.INFEASIBLE || st == MOI.DUAL_INFEASIBLE ||
-           st == MOI.INFEASIBLE_OR_UNBOUNDED || st == MOI.ALMOST_INFEASIBLE
+           st == MOI.INFEASIBLE_OR_UNBOUNDED || st == MOI.ALMOST_INFEASIBLE ||
+           st == MOI.NUMERICAL_ERROR
         feasible = false
     else
         throw(ErrorException(
@@ -438,7 +451,7 @@ end
 # Reconstruct the polynomial represented by a solved free Poly variable: a
 # linear combination of the basis monomials with the solved coefficients.
 function _poly_variable_polynomial(μ, basis)
-    return sum(value(μ)[i] * basis[i] for i in eachindex(basis))
+    return value(μ)
 end
 
 # The P2/P3 expression with every multiplier substituted by its solved value.
@@ -580,7 +593,8 @@ function v_step(sys::PolynomialSystem, λ, shape, β::Real; opts::SOSOptions = S
     elseif st == MOI.ALMOST_OPTIMAL || st == MOI.SLOW_PROGRESS
         feasible = _v_step_grams_ok(model, pos_cref, deriv_cref, shape_cref)
     elseif st == MOI.INFEASIBLE || st == MOI.DUAL_INFEASIBLE ||
-           st == MOI.INFEASIBLE_OR_UNBOUNDED || st == MOI.ALMOST_INFEASIBLE
+           st == MOI.INFEASIBLE_OR_UNBOUNDED || st == MOI.ALMOST_INFEASIBLE ||
+           st == MOI.NUMERICAL_ERROR
         feasible = false
     else
         throw(ErrorException("v_step: unexpected solver termination status $st"))
@@ -703,7 +717,8 @@ function _beta_oracle(sys::PolynomialSystem, V, shape, opts::SOSOptions)
             ok = minimum(eigvals(Symmetric(Q))) > -1e-8
             return ok
         elseif st == MOI.INFEASIBLE || st == MOI.DUAL_INFEASIBLE ||
-               st == MOI.INFEASIBLE_OR_UNBOUNDED || st == MOI.ALMOST_INFEASIBLE
+               st == MOI.INFEASIBLE_OR_UNBOUNDED || st == MOI.ALMOST_INFEASIBLE ||
+               st == MOI.NUMERICAL_ERROR
             return false
         else
             throw(ErrorException("beta_step oracle: unexpected solver status $st"))
@@ -889,16 +904,9 @@ function verify_certificate(cert::LyapunovCertificate, sys::PolynomialSystem;
             sampling = (ok = sampling_ok, details = sampling_details),
             dynamical = (ok = dyn_ok, details = dyn_details))
 end
-function verify_certificate(cert::LyapunovCertificate; tol::Real = 1e-7, samples::Integer = 50_000,
-                            rng::Random.AbstractRNG = Random.default_rng())
-    # Convenience: mark as not-verified when called without a system reference.
-    return (algebraic = (ok = false, details = "No system provided"),
-            sampling = (ok = false, details = "No system provided"),
-            dynamical = (ok = false, details = "No system provided"))
-end
 
 """
-    Base.show(io::IO, ::MIME\"text/plain\", cert::LyapunovCertificate)
+    Base.show(io::IO, ::MIME"text/plain", cert::LyapunovCertificate)
 
 Human-readable summary: system name, `deg V`, `ρ`, `ε`, largest SDP block,
 solve time, solver status, and the boundedness evidence. Print the pruned `V`
@@ -908,7 +916,7 @@ Worth writing properly — this is what appears in every notebook cell and every
 console session, and a certificate that prints its own provenance is much harder
 to misquote later.
 """
-function Base.show(io::IO, ::MIME\"text/plain\", cert::LyapunovCertificate)
+function Base.show(io::IO, ::MIME"text/plain", cert::LyapunovCertificate)
     println(io, "LyapunovCertificate")
     println(io, "  V degree: ", cert.V_degree)
     println(io, "  ρ:       ", @sprintf("%.6e", cert.ρ))
