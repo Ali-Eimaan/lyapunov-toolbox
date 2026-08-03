@@ -12,14 +12,28 @@ import pytest
 
 def pytest_collection_modifyitems(config, items):
     """Skip ``@pytest.mark.julia`` tests when the backend cannot start."""
+    import os
+
     from lyapunov_toolbox.julia_bridge import julia_available
-    require = config.getoption("--require-julia", default=False)
+
+    require = (
+        config.getoption("--require-julia", default=False)
+        or os.environ.get("LYAPUNOV_TOOLBOX_REQUIRE_JULIA") == "1"
+    )
 
     if not hasattr(config, "_lyapunov_julia_available"):
         try:
             config._lyapunov_julia_available = julia_available()
         except Exception:
             config._lyapunov_julia_available = False
+
+    if require and not config._lyapunov_julia_available:
+        raise RuntimeError(
+            "Julia backend required but unavailable "
+            "(--require-julia / LYAPUNOV_TOOLBOX_REQUIRE_JULIA=1). "
+            "Instantiate the Julia project with "
+            "`julia --project=julia -e 'import Pkg; Pkg.instantiate()'`."
+        )
 
     skip_julia = pytest.mark.skip(
         reason="Julia backend not available — set LYAPUNOV_TOOLBOX_REQUIRE_JULIA=1 to fail instead"

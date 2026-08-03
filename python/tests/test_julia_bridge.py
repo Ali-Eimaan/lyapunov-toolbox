@@ -18,7 +18,9 @@ import pytest
 class TestSessionStartup:
     def test_import_does_not_start_julia(self):
         """Importing ``lyapunov_toolbox`` must not boot a Julia runtime."""
-        import subprocess, sys, time
+        import subprocess
+        import sys
+        import time
         t0 = time.time()
         result = subprocess.run(
             [sys.executable, "-c", "import lyapunov_toolbox"],
@@ -39,7 +41,7 @@ class TestSessionStartup:
     @pytest.mark.julia
     def test_conflicting_session_config_raises(self):
         """Requesting a different backend or project after startup raises."""
-        from lyapunov_toolbox.julia_bridge import get_session, JuliaSession
+        from lyapunov_toolbox.julia_bridge import get_session
         s = get_session()  # Ensure initialised
         # Re-requesting with same config should return same session (no error)
         s2 = get_session()
@@ -48,6 +50,7 @@ class TestSessionStartup:
     def test_missing_backend_error_names_the_fix(self):
         """With an invalid project path, error message contains Pkg.instantiate()."""
         import os
+
         from lyapunov_toolbox.julia_bridge import julia_available
         # Set a nonsense project path
         old = os.environ.get("PYTHON_JULIACALL_PROJECT", "")
@@ -69,6 +72,7 @@ class TestSessionStartup:
     def test_julia_available_never_raises(self):
         """Returns a bool even when the project path is nonsense."""
         import os
+
         from lyapunov_toolbox.julia_bridge import julia_available
         old = os.environ.get("PYTHON_JULIACALL_PROJECT", "")
         os.environ["PYTHON_JULIACALL_PROJECT"] = "/nonexistent/path"
@@ -87,12 +91,13 @@ class TestMarshalling:
     def test_polynomial_round_trips(self):
         """Send a polynomial to Julia and read it back; coefficients match."""
         import numpy as np
-        from lyapunov_toolbox.julia_bridge import get_session, _marshal_polynomial
+
+        from lyapunov_toolbox.julia_bridge import _marshal_polynomial, get_session
         session = get_session()
         # Create a simple polynomial in Julia
-        session.call("using DynamicPolynomials")
+        session.eval("using DynamicPolynomials")
         poly = session.eval("@polyvar x1 x2; x1^2 + 2*x1*x2 + x2^2")
-        exponents, coeffs = _marshal_polynomial(poly)
+        exponents, coeffs = _marshal_polynomial(poly, ("x1", "x2"))
         assert exponents.shape[1] == 2  # 2 variables
         assert len(coeffs) > 0
         assert np.allclose(np.sum(coeffs * np.prod(np.array([1.0, 2.0]) ** exponents, axis=1)), 9.0)
@@ -138,27 +143,33 @@ class TestCertifyRoa:
     def test_python_evaluation_matches_julia(self):
         """``RoaCertificate.evaluate`` agrees with Julia to 1e-10."""
         import numpy as np
+
         from lyapunov_toolbox.julia_bridge import certify_roa, get_session
         cert = certify_roa("[-x2, x1 + (x1^2 - 1)*x2]", variables=("x1", "x2"),
                            V_degree=2)
         session = get_session()
+        # Reconstruct V(x1, x2) in Julia from the marshalled (exponents, coefficients).
+        terms = " + ".join(
+            f"{coeff}*x1^{int(e[0])}*x2^{int(e[1])}"
+            for e, coeff in zip(cert.exponents, cert.coefficients, strict=True)
+        )
         rng = np.random.RandomState(42)
         pts = rng.uniform(-0.5, 0.5, (100, 2))
         for pt in pts[:10]:  # Check 10 points
             py_val = cert.evaluate(pt)
             jl_val = float(session.eval(
                 f"using DynamicPolynomials; @polyvar x1 x2; "
-                f"V = {session._marshal_expr(cert.V_exponents, cert.V_coeffs)}; "
+                f"V = {terms}; "
                 f"V(x1 => {pt[0]}, x2 => {pt[1]})"
-            ) if hasattr(session, '_marshal_expr') else py_val)
-            # If we can't marshal back, just check py_val is finite
-            assert np.isfinite(py_val)
+            ))
+            assert abs(py_val - jl_val) < 1e-10
 
     @pytest.mark.julia
     def test_boundary_2d_matches_julia(self):
         """``RoaCertificate.boundary_2d`` returns a closed curve."""
-        from lyapunov_toolbox.julia_bridge import certify_roa
         import numpy as np
+
+        from lyapunov_toolbox.julia_bridge import certify_roa
         cert = certify_roa("[-x2, x1 + (x1^2 - 1)*x2]", variables=("x1", "x2"),
                            V_degree=2)
         boundary = cert.boundary_2d(n=100)
@@ -168,19 +179,66 @@ class TestCertifyRoa:
 
     @pytest.mark.julia
     def test_unverifiable_certificate_is_not_returned(self):
-        """Force verification to fail and assert error is raised."""
+        """An infeasible SOS program raises instead of returning a certificate."""
         import pytest
-        from lyapunov_toolbox.julia_bridge import certify_roa
-        # epsilon=0 on a borderline system should cause issues
-        with pytest.raises(Exception):
+
+        from lyapunov_toolbox.julia_bridge import JuliaBackendError, certify_roa
+        # V_degree=1 cannot be SOS positive-definite, so the program is
+        # infeasible; certify_roa must surface the failure rather than
+        # returning a bogus certificate.
+        with pytest.raises((JuliaBackendError, ValueError)):
             certify_roa("[-x2, x1 + (x1^2 - 1)*x2]", variables=("x1", "x2"),
-                        V_degree=2, epsilon=0.0, require_verification=True)
+                        V_degree=1)
 
     @pytest.mark.julia
     @pytest.mark.slow
     def test_both_backends_agree(self):
         """juliacall and pyjulia produce the same rho to 1e-9. Skips if pyjulia not installed."""
-        pytest.skip("pyjulia backend comparison requires separate process — manual test only")
+        import subprocess
+        import sys
+
+        # pyjulia is an optional extra (``pip install lyapunov-toolbox[pyjulia]``).
+        # Both backends embed libjulia, so each must run in its own subprocess;
+        # only pyjulia's presence can be probed from here.
+        try:
+            import julia  # noqa: F401
+        except ImportError:
+            pytest.skip(
+                "pyjulia (the 'julia' package) is not installed — run "
+                "`pip install julia` to exercise the backend comparison"
+            )
+
+        def rho_for(backend: str) -> float:
+            script = f"""\
+import os
+os.environ['LYAPUNOV_TOOLBOX_BRIDGE'] = {backend!r}
+from lyapunov_toolbox.julia_bridge import certify_roa
+cert = certify_roa('[-x2, x1 + (x1^2 - 1)*x2]', variables=('x1', 'x2'), V_degree=2)
+print('RHO=%r' % cert.rho)
+"""
+            proc = subprocess.run(
+                [sys.executable, "-c", script],
+                capture_output=True,
+                text=True,
+                timeout=600,
+            )
+            assert proc.returncode == 0, (
+                f"backend {backend!r} crashed:\n--- stdout ---\n{proc.stdout}"
+                f"\n--- stderr ---\n{proc.stderr}"
+            )
+            for line in proc.stdout.splitlines():
+                if line.startswith("RHO="):
+                    return float(line.split("=", 1)[1])
+            raise AssertionError(
+                f"no RHO= line in output for backend {backend!r}:\n{proc.stdout}\n{proc.stderr}"
+            )
+
+        rho_juliacall = rho_for("juliacall")
+        rho_pyjulia = rho_for("pyjulia")
+        assert abs(rho_juliacall - rho_pyjulia) < 1e-9, (
+            f"backends disagree on rho: juliacall={rho_juliacall!r}, "
+            f"pyjulia={rho_pyjulia!r}"
+        )
 
 
 class TestExpressionSafety:
@@ -198,6 +256,7 @@ class TestExpressionSafety:
     def test_rejects_non_arithmetic(self, expr):
         """Every one of these raises ``ValueError`` before any Julia call."""
         import pytest
+
         from lyapunov_toolbox.julia_bridge import _check_expression_safety
         with pytest.raises(ValueError):
             _check_expression_safety(expr, ("x1", "x2"))
@@ -211,6 +270,7 @@ class TestExpressionSafety:
     def test_rejects_undeclared_variable(self):
         """``"x1 + y"`` with ``variables=("x1", "x2")`` raises ``ValueError`` naming ``y``."""
         import pytest
+
         from lyapunov_toolbox.julia_bridge import _check_expression_safety
         with pytest.raises(ValueError, match="y"):
             _check_expression_safety("x1 + y", ("x1", "x2"))
@@ -220,14 +280,22 @@ class TestSerialisation:
     def test_save_load_round_trip(self, tmp_path):
         """A certificate written with ``save`` and read with ``load_certificate`` compares equal."""
         import numpy as np
+
         from lyapunov_toolbox.julia_bridge import RoaCertificate, load_certificate
         # Create a minimal certificate manually
         cert = RoaCertificate(
-            V_exponents=np.array([[2, 0], [0, 2]], dtype=np.int32),
-            V_coeffs=np.array([1.0, 1.0]),
-            rho=0.5, epsilon=1e-6, solver_status="OPTIMAL",
-            sdp_size=(10, 20), verified=True, bounded=True,
-            solve_time=1.5, iters=3, config={"V_degree": 2}
+            exponents=np.array([[2, 0], [0, 2]], dtype=np.int64),
+            coefficients=np.array([1.0, 1.0]),
+            rho=0.5,
+            variables=("x1", "x2"),
+            epsilon=1e-6,
+            system_name="custom",
+            solver_status="OPTIMAL",
+            solve_time=1.5,
+            sdp_size=10,
+            bounded=True,
+            boundedness_evidence="x^T A x with A ⪰ I",
+            verified=True,
         )
         path = tmp_path / "test_cert.json"
         cert.save(str(path))
@@ -235,19 +303,29 @@ class TestSerialisation:
         assert loaded.rho == cert.rho
         assert loaded.verified == cert.verified
         assert loaded.bounded == cert.bounded
-        assert np.allclose(loaded.V_coeffs, cert.V_coeffs)
+        assert np.allclose(loaded.coefficients, cert.coefficients)
+        assert np.array_equal(loaded.exponents, cert.exponents)
 
     def test_load_rejects_tampered_certificate(self, tmp_path):
         """Edit the saved JSON to set ``bounded`` false and assert loading raises."""
         import json
+
         import numpy as np
+
         from lyapunov_toolbox.julia_bridge import RoaCertificate, load_certificate
         cert = RoaCertificate(
-            V_exponents=np.array([[2, 0]], dtype=np.int32),
-            V_coeffs=np.array([1.0]), rho=0.5, epsilon=1e-6,
-            solver_status="OPTIMAL", sdp_size=(10, 20),
-            verified=True, bounded=True, solve_time=1.0, iters=1,
-            config={"V_degree": 2}
+            exponents=np.array([[2, 0]], dtype=np.int64),
+            coefficients=np.array([1.0]),
+            rho=0.5,
+            variables=("x1", "x2"),
+            epsilon=1e-6,
+            system_name="custom",
+            solver_status="OPTIMAL",
+            solve_time=1.0,
+            sdp_size=10,
+            bounded=True,
+            boundedness_evidence="x^T A x with A ⪰ I",
+            verified=True,
         )
         path = tmp_path / "tampered.json"
         cert.save(str(path))
@@ -263,7 +341,10 @@ class TestSerialisation:
 
     def test_load_rejects_unknown_format_version(self, tmp_path):
         """Unknown format version raises ValueError."""
-        import json, pytest
+        import json
+
+        import pytest
+
         from lyapunov_toolbox.julia_bridge import load_certificate
         path = tmp_path / "bad_version.json"
         with open(path, "w") as f:
@@ -275,40 +356,56 @@ class TestSerialisation:
 class TestPlottingWithoutJulia:
     def test_plot_roa_2d_from_saved_certificate(self, tmp_path):
         """Plot a certificate loaded from disk with no Julia session started."""
-        import numpy as np
         import matplotlib
+        import numpy as np
         matplotlib.use("Agg")
         from lyapunov_toolbox.julia_bridge import RoaCertificate
         from lyapunov_toolbox.plotting import plot_roa_2d
         cert = RoaCertificate(
-            V_exponents=np.array([[2, 0], [0, 2]], dtype=np.int32),
-            V_coeffs=np.array([1.0, 1.0]), rho=1.0, epsilon=1e-6,
-            solver_status="OPTIMAL", sdp_size=(5, 10),
-            verified=True, bounded=True, solve_time=0.5, iters=1,
-            config={"V_degree": 2}
+            exponents=np.array([[2, 0], [0, 2]], dtype=np.int64),
+            coefficients=np.array([1.0, 1.0]),
+            rho=1.0,
+            variables=("x1", "x2"),
+            epsilon=1e-6,
+            system_name="custom",
+            solver_status="OPTIMAL",
+            solve_time=0.5,
+            sdp_size=5,
+            bounded=True,
+            boundedness_evidence="x^T A x with A ⪰ I",
+            verified=True,
         )
-        fig, ax = plot_roa_2d(cert, xlim=(-2, 2), ylim=(-2, 2))
+        ax = plot_roa_2d(cert)
         assert ax is not None
         import matplotlib.pyplot as plt
-        plt.close(fig)
+        plt.close(ax.figure)
 
     def test_slice_title_states_pinned_values(self):
         """A 2-D slice of a 4-D certificate produces a title containing pinned variables."""
-        import numpy as np
         import matplotlib
+        import numpy as np
         matplotlib.use("Agg")
         from lyapunov_toolbox.julia_bridge import RoaCertificate
         from lyapunov_toolbox.plotting import plot_roa_2d
         cert = RoaCertificate(
-            V_exponents=np.array([[1,0,0,0],[0,1,0,0],[0,0,1,0],[0,0,0,1]], dtype=np.int32),
-            V_coeffs=np.array([1.0, 1.0, 1.0, 1.0]),
-            rho=1.0, epsilon=1e-6, solver_status="OPTIMAL",
-            sdp_size=(5, 10), verified=True, bounded=True,
-            solve_time=0.5, iters=1, config={"V_degree": 1}
+            exponents=np.array(
+                [[1, 0, 0, 0], [0, 1, 0, 0], [0, 0, 1, 0], [0, 0, 0, 1]],
+                dtype=np.int64,
+            ),
+            coefficients=np.array([1.0, 1.0, 1.0, 1.0]),
+            rho=1.0,
+            variables=("x1", "x2", "x3", "x4"),
+            epsilon=1e-6,
+            system_name="custom",
+            solver_status="OPTIMAL",
+            solve_time=0.5,
+            sdp_size=5,
+            bounded=True,
+            boundedness_evidence="x^T A x with A ⪰ I",
+            verified=True,
         )
-        fig, ax = plot_roa_2d(cert, xlim=(-2, 2), ylim=(-2, 2),
-                              slice_dims=(0, 1), slice_vals=(0.0, 0.0))
+        ax = plot_roa_2d(cert, axes=(0, 1), fixed={2: 0.0, 3: 0.0})
         title = ax.get_title()
-        assert "0" in title or "pinned" in title.lower() or "slice" in title.lower()
+        assert "Slice" in title and "0" in title
         import matplotlib.pyplot as plt
-        plt.close(fig)
+        plt.close(ax.figure)

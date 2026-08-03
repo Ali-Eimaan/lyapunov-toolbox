@@ -54,7 +54,7 @@ def use_style() -> None:
         "grid.alpha": 0.25,
         "axes.spines.top": False,
         "axes.spines.right": False,
-        "axes.prop_cycle": mpl.cycler(
+        "axes.prop_cycle": mpl.cycler(  # type: ignore[attr-defined]
             color=["#1b9e77", "#d95f02", "#7570b3", "#e7298a", "#66a61e", "#e6ab02"]
         ),
     })
@@ -88,7 +88,7 @@ def plot_roa_2d(
         # Interior contours at ρ * [0.25, 0.5, 0.75].
         for frac in [0.25, 0.5, 0.75]:
             # Scale the boundary inward.
-            ax.plot(bx * sqrt(frac), by * sqrt(frac), color="C0",
+            ax.plot(bx * np.sqrt(frac), by * np.sqrt(frac), color="C0",
                     linewidth=0.5, linestyle="--", alpha=0.5)
 
     if true_boundary is not None:
@@ -106,7 +106,7 @@ def plot_roa_2d(
                        label="Leakage (FALSE CERTIFICATE)")
             import warnings
             warnings.warn("Certified set extends outside true ROA boundary — "
-                          "this is a false certificate!")
+                          "this is a false certificate!", stacklevel=2)
 
     ax.set_xlabel(labels[axes[0]] if labels else f"$x_{axes[0]+1}$")
     ax.set_ylabel(labels[axes[1]] if labels else f"$x_{axes[1]+1}$")
@@ -126,6 +126,7 @@ def plot_phase_portrait(
     dynamics: Any,
     *,
     ax: Any = None,
+    axes: tuple[int, int] = (0, 1),
     xlim: tuple[float, float] = (-3.0, 3.0),
     ylim: tuple[float, float] = (-3.0, 3.0),
     density: float = 1.2,
@@ -138,6 +139,10 @@ def plot_phase_portrait(
     if ax is None:
         _, ax = plt.subplots()
 
+    if fixed is None:
+        fixed = {}
+    n_vars = len(fixed) + 2
+
     x_vals = np.linspace(xlim[0], xlim[1], int(30 * density))
     y_vals = np.linspace(ylim[0], ylim[1], int(30 * density))
     X, Y = np.meshgrid(x_vals, y_vals)
@@ -147,7 +152,11 @@ def plot_phase_portrait(
     Vf = np.zeros_like(Y)
     for i in range(X.shape[0]):
         for j in range(X.shape[1]):
-            pt = np.array([X[i, j], Y[i, j]])
+            pt = np.zeros(n_vars)
+            pt[axes[0]] = X[i, j]
+            pt[axes[1]] = Y[i, j]
+            for k, v in fixed.items():
+                pt[k] = v
             dx = dynamics(pt)
             U[i, j] = dx[axes[0]] if hasattr(dx, "__getitem__") else dx[0]
             Vf[i, j] = dx[axes[1]] if hasattr(dx, "__getitem__") else dx[1]
@@ -315,7 +324,6 @@ def plot_consensus_tube(
         ax1, ax2 = fig.subplots(1, 2)
 
     # Left panel: agent states over time.
-    max_len = max(len(t) for t in trajectories)
     for i, traj in enumerate(trajectories):
         t_vals = np.arange(len(traj))
         ax1.plot(t_vals, traj, linewidth=1, alpha=0.7, label=f"Agent {i+1}")
@@ -345,7 +353,13 @@ def plot_consensus_tube(
     return fig
 
 
-def save_figure(fig: Any, name: str, *, directory: str | Path | None = None, dpi: int = 200) -> Path:
+def save_figure(
+    fig: Any,
+    name: str,
+    *,
+    directory: str | Path | None = None,
+    dpi: int = 200,
+) -> Path:
     """Save to ``docs/figures/<name>.png`` (default) and return the path."""
     if directory is None:
         directory = Path(__file__).resolve().parents[2] / "docs" / "figures"

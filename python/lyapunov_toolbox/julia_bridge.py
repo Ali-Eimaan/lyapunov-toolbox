@@ -149,7 +149,7 @@ class RoaCertificate:
         return int(np.max(np.sum(self.exponents, axis=1)))
 
     # ------------------------------------------------------------- evaluation
-    def evaluate(self, x: Array) -> Array:
+    def evaluate(self, x: Array) -> Array | float:
         """Evaluate ``V`` at ``x``.
 
         Accepts ``(n_vars,)`` or ``(k, n_vars)`` and returns a scalar or ``(k,)``.
@@ -271,7 +271,7 @@ class JuliaSession:
             )
         import os
 
-        self._backend: Backend = backend or os.environ.get("LYAPUNOV_TOOLBOX_BRIDGE", "juliacall")
+        self._backend: Backend = backend or os.environ.get("LYAPUNOV_TOOLBOX_BRIDGE", "juliacall")  # type: ignore[assignment]
         if project is None:
             project = os.environ.get("LYAPUNOV_TOOLBOX_JULIA_PROJECT", str(DEFAULT_JULIA_PROJECT))
         self._project = Path(project)
@@ -302,16 +302,22 @@ class JuliaSession:
 
     def _start_juliacall(self) -> Any:
         """Start via ``juliacall``."""
-        import os
-        os.environ["PYTHON_JULIACALL_PROJECT"] = str(self._project)
         try:
             import juliacall
-            return juliacall
         except ImportError as exc:
             raise JuliaBackendError(
                 "juliacall is not installed. Install it with:\n"
                 "  pip install juliacall"
             ) from exc
+
+        # Activate the toolbox project inside the running Julia process rather
+        # than via PYTHON_JULIACALL_PROJECT: newer juliacall versions refuse to
+        # start when that variable is set without PYTHON_JULIACALL_EXE, and
+        # activating at runtime avoids leaking state into the process environ.
+        from juliacall import Main as jl_main
+
+        jl_main.seval(f'using Pkg; Pkg.activate("{self._project}")')
+        return juliacall
 
     def _start_pyjulia(self) -> Any:
         """Start via ``julia`` (PyJulia)."""
@@ -405,19 +411,16 @@ def certify_roa(
     verbose: bool = False,
 ) -> RoaCertificate:
     """Certify an ROA for a polynomial vector field given as strings."""
-    if isinstance(dynamics, (list, tuple)):
-        for expr in dynamics:
-            _check_expression_safety(expr, variables)
-        for expr in constraints:
-            _check_expression_safety(expr, variables)
-        for expr in invariants:
-            _check_expression_safety(expr, variables)
+    if callable(dynamics):
+        # A Python callable mapping the state variables to the RHS components.
+        dyn_str = _vector_literal(dynamics(variables), variables)
+    else:
+        dyn_str = _vector_literal(dynamics, variables)
+    constr_str = _vector_literal(constraints, variables) if constraints else "[]"
+    inv_str = _vector_literal(invariants, variables) if invariants else "[]"
 
     session = get_session()
-    var_str = "[" + ", ".join(variables) + "]"
-    dyn_str = "[" + ", ".join(dynamics) + "]"
-    constr_str = "[" + ", ".join(constraints) + "]" if constraints else "[]"
-    inv_str = "[" + ", ".join(invariants) + "]" if invariants else "[]"
+    var_str = " ".join(variables)
 
     code = f"""
     using DynamicPolynomials
@@ -426,19 +429,18 @@ def certify_roa(
     f = {dyn_str}
     g = {constr_str}
     h = {inv_str}
-    sys = LyapunovToolbox.PolynomialSystem("custom", f, x, zeros(length(x));
-                                            constraints = g, equalities = h)
+    sys = LyapunovToolbox.PolynomialSystem(x, f, "custom", zeros(length(x)),
+                                           g, h, String[], "")
     opts = LyapunovToolbox.SOSOptions(ε = {epsilon},
                                        V_degree = {V_degree},
                                        multiplier_degree = {multiplier_degree},
-                                       verbose = {verbose})
-    result = LyapunovToolbox.synthesize_lyapunov(sys; opts = opts)
-    cert = result.certificate
-    LyapunovToolbox.verify_certificate(cert, sys)
-    cert
+                                       verbose = {'true' if verbose else 'false'})
+    cert = LyapunovToolbox.synthesize_lyapunov(sys; opts = opts)
+    vc = LyapunovToolbox.verify_certificate(cert, sys)
+    (cert, vc.algebraic.ok && vc.sampling.ok && vc.dynamical.ok)
     """
     try:
-        jl_cert = session.eval(code)
+        jl_cert, is_verified = session.eval(code)
     except Exception as exc:
         raise JuliaBackendError(
             f"ROA certification failed. Dynamics: {dynamics}, "
@@ -447,9 +449,6 @@ def certify_roa(
 
     # Marshal to Python.
     exponents, coefficients = _marshal_polynomial(jl_cert.V, variables)
-    is_verified = bool(session.eval(
-        f"LyapunovToolbox.verify_certificate({jl_cert}, sys)"
-    ))
     return RoaCertificate(
         exponents=exponents,
         coefficients=coefficients,
@@ -457,12 +456,12 @@ def certify_roa(
         variables=tuple(variables),
         epsilon=float(epsilon),
         system_name=str(jl_cert.system_name),
-        solver_status=str(jl_cert.status),
+        solver_status=str(jl_cert.solver_status),
         solve_time=float(jl_cert.solve_time),
-        sdp_size=int(jl_cert.gram_dim),
+        sdp_size=int(jl_cert.sdp_size),
         bounded=bool(jl_cert.bounded),
         boundedness_evidence=str(jl_cert.boundedness_evidence),
-        verified=is_verified,
+        verified=bool(is_verified),
     )
 
 
@@ -493,19 +492,18 @@ def synthesize(
     opts = LyapunovToolbox.SOSOptions(V_degree = {V_degree},
                                        multiplier_degree = {multiplier_degree},
                                        vs_iterations = {vs_iterations})
-    result = LyapunovToolbox.synthesize_lyapunov(sys; opts = opts)
-    (result.certificate, result)
+    result = LyapunovToolbox.v_s_iteration(sys; opts = opts)
+    vc = LyapunovToolbox.verify_certificate(result.certificate, sys)
+    (result.certificate, result,
+     vc.algebraic.ok && vc.sampling.ok && vc.dynamical.ok)
     """
     try:
-        jl_cert, jl_result = session.eval(code)
+        jl_cert, jl_result, is_verified = session.eval(code)
     except Exception as exc:
         raise JuliaBackendError(f"Synthesis for '{system}' failed: {exc}") from exc
 
     variables = [str(v) for v in session.eval("sys.x")]
     exponents, coefficients = _marshal_polynomial(jl_cert.V, variables)
-    is_verified = bool(session.eval(
-        f"LyapunovToolbox.verify_certificate({jl_cert}, sys)"
-    ))
     cert = RoaCertificate(
         exponents=exponents,
         coefficients=coefficients,
@@ -513,12 +511,12 @@ def synthesize(
         variables=tuple(variables),
         epsilon=float(kwargs.get("epsilon", 1e-6)),
         system_name=str(jl_cert.system_name),
-        solver_status=str(jl_cert.status),
+        solver_status=str(jl_cert.solver_status),
         solve_time=float(jl_cert.solve_time),
-        sdp_size=int(jl_cert.gram_dim),
+        sdp_size=int(jl_cert.sdp_size),
         bounded=bool(jl_cert.bounded),
         boundedness_evidence=str(jl_cert.boundedness_evidence),
-        verified=is_verified,
+        verified=bool(is_verified),
     )
     history = {
         "rho_history": [float(v) for v in jl_result.ρ_history],
@@ -526,8 +524,8 @@ def synthesize(
         "volume_history": [float(v) for v in jl_result.volume_history],
         "iterations": int(jl_result.iterations),
         "converged": bool(jl_result.converged),
-        "n_sdps": int(jl_result.total_sdps),
-        "total_solve_time": float(jl_result.total_time),
+        "n_sdps": int(jl_result.n_sdps),
+        "total_solve_time": float(jl_result.total_solve_time),
     }
     return cert, history
 
@@ -541,31 +539,63 @@ def load_certificate(path: str | Path) -> RoaCertificate:
     return RoaCertificate.from_dict(data)
 
 
-def _marshal_polynomial(julia_poly: Any, variables: Sequence[str]) -> tuple[NDArray[np.int64], Array]:
-    """Convert a Julia polynomial into ``(exponents, coefficients)``."""
-    import juliacall
+def _marshal_polynomial(
+    julia_poly: Any,
+    variables: Sequence[str],
+    session: JuliaSession | None = None,
+) -> tuple[NDArray[np.int64], Array]:
+    """Convert a Julia polynomial into ``(exponents, coefficients)``.
 
-    # Convert to Julia dict of monomial => coefficient.
-    terms_dict = juliacall.Main.seval(
-        f"DynamicPolynomials.monomials({julia_poly}) => "
-        f"DynamicPolynomials.coefficients({julia_poly})"
-    )
+    The polynomial arrives as a backend-wrapped Julia object (a juliacall
+    ``JlValue`` or a pyjulia ``julia.Any``), which must be passed to Julia
+    functions as an argument rather than string-interpolated into Julia
+    source (a wrapped object is a Python-side reference, not a Julia
+    binding). All extraction runs in one Julia helper that returns plain
+    arrays. Works with whichever backend the active session uses.
+    """
+    if session is None:
+        session = get_session()
+
+    helper_source = """
+    function _py_marshal_poly(p, varnames)
+        vs = DynamicPolynomials.variables(p)
+        idx = [findfirst(v -> string(v) == vn, vs) for vn in varnames]
+        any(isnothing, idx) &&
+            error("marshalling: a variable was not found in the polynomial")
+        ms = DynamicPolynomials.monomials(p)
+        cs = DynamicPolynomials.coefficients(p)
+        E = [degree(m, vs[i]) for m in ms, i in idx]
+        return (E, cs)
+    end
+    """
+
     n_vars = len(variables)
-    exponents_list = []
-    coeffs_list = []
-    for monomial, coeff in terms_dict.items():
-        exp_vec = np.zeros(n_vars, dtype=np.int64)
-        for i, var_name in enumerate(variables):
-            exp_vec[i] = int(juliacall.Main.seval(f"DynamicPolynomials.degree({monomial}, {var_name})"))
-        exponents_list.append(exp_vec)
-        coeffs_list.append(float(coeff))
 
-    if not exponents_list:
+    if session._backend == "juliacall":
+        import juliacall
+
+        jl = juliacall.Main
+        jl.seval("using DynamicPolynomials")
+        if not hasattr(jl, "_py_marshal_poly"):
+            jl.seval(helper_source)
+        exponents, coefficients = jl.seval("_py_marshal_poly")(
+            julia_poly, list(variables)
+        )
+    else:
+        from julia import Main as jl_main
+
+        jl_main.eval("using DynamicPolynomials")
+        if not hasattr(jl_main, "_py_marshal_poly"):
+            jl_main.eval(helper_source)
+        exponents, coefficients = jl_main._py_marshal_poly(
+            julia_poly, list(variables)
+        )
+
+    exponents = np.asarray(exponents, dtype=np.int64)
+    coefficients = np.asarray(coefficients, dtype=np.float64)
+    if exponents.size == 0:
         exponents = np.zeros((1, n_vars), dtype=np.int64)
         coefficients = np.zeros(1, dtype=np.float64)
-    else:
-        exponents = np.array(exponents_list, dtype=np.int64)
-        coefficients = np.array(coeffs_list, dtype=np.float64)
     return exponents, coefficients
 
 
@@ -591,3 +621,25 @@ def _check_expression_safety(expr: str, variables: Sequence[str]) -> None:
             f"Expression '{expr}' contains characters outside the allowed set. "
             f"Only arithmetic (+, -, *, /, ^) on {variables} is allowed."
         )
+
+
+def _vector_literal(
+    exprs: Sequence[str] | str, variables: Sequence[str]
+) -> str:
+    """Validate and normalise a vector of expressions into a Julia literal.
+
+    Accepts either a sequence of component strings (``["-x2", "x1 - x2"]``)
+    or a single string already containing the whole Julia vector literal
+    (``"[-x2, x1 - x2]"``).
+    """
+    if isinstance(exprs, str):
+        inner = exprs.strip()
+        if inner.startswith("[") and inner.endswith("]"):
+            inner = inner[1:-1]
+        for component in inner.split(","):
+            _check_expression_safety(component.strip(), variables)
+        return exprs
+    components = list(exprs)
+    for component in components:
+        _check_expression_safety(component, variables)
+    return "[" + ", ".join(components) + "]"
