@@ -32,16 +32,35 @@ function [rho, V, info] = compute_roa_yalmip(f, x, V0, opts)
 %               .maxIter        bisection iteration cap           (40)
 %               .solver         'mosek' | 'sedumi' | 'sdpt3'      ('mosek')
 %               .verbose        0 or 1                            (0)
+%               .boundedRadius  sphere radius for the boundedness
+%                               sampling fallback                 (50)
+%               .boundedSamples number of sphere samples          (5000)
 %
 %   OUTPUTS
-%     RHO   - certified level (double). Always a VERIFIED feasible value, never
-%             the midpoint of the final bracket.
+%     RHO   - certified level (double). Always a VERIFIED feasible value: it is
+%             re-solved once at the end of the bisection, and the routine errors
+%             rather than returning a level no solver ever accepted.
 %     V     - the Lyapunov function (unchanged from V0 in this routine; the
-%             V-s iteration is Julia-side only, deliberately - see the guide).
-%     INFO  - struct with .iterations, .solverTime, .solverStatus, .lambda,
-%             .sigma, .gramV, .gramVdot, .config. INFO.config records every
-%             OPTS field actually used, so a result can be reproduced from the
-%             INFO struct alone.
+%             V-s iteration is Julia-side only, deliberately - see README).
+%     INFO  - struct with:
+%               .iterations           bisection iterations run
+%               .solverTime           summed solver time (s)
+%               .solverStatus         status at the returned RHO
+%               .lambda               multiplier at the returned RHO
+%               .sigma                cell array of constraint multipliers
+%               .gramV                Gram matrix of the V0 positivity
+%                                     certificate (P1)
+%               .gramVdot             Gram matrix of the derivative
+%                                     constraint (P2/P3) at the returned RHO
+%               .gramLambda           Gram matrix of the SOS multiplier
+%               .gramResidual         worst SOS residual reported by SOLVESOS
+%               .minEigQ              smallest eigenvalue over all Gram
+%                                     matrices at the returned RHO
+%               .bounded              logical
+%               .boundednessEvidence  'top_form_pd' | 'sampling_only'
+%               .solverResolved       solver actually used
+%               .config               every OPTS field actually used, so a
+%                                     result is reproducible from INFO alone
 %
 %   THE PROGRAM SOLVED, for fixed rho:
 %
@@ -53,138 +72,331 @@ function [rho, V, info] = compute_roa_yalmip(f, x, V0, opts)
 %   Vdot <= -epsilon*x'*x < 0 away from the origin. See
 %   docs/derivations/positivstellensatz.tex.
 %
+%   BOUNDEDNESS. The conclusion "Omega_rho is inside the ROA" needs Omega_rho to
+%   be BOUNDED; without it, Vdot < 0 on the sublevel set implies neither
+%   invariance nor convergence. This routine checks it and reports which kind of
+%   evidence it obtained, mirroring is_sublevel_set_bounded on the Julia side:
+%     'top_form_pd'   - conclusive (exact for a quadratic V0);
+%     'sampling_only' - a necessary-condition screen, NOT a proof.
+%   A witness of unboundedness is an error, not a warning.
+%
 %   REQUIREMENTS
 %     YALMIP (tested with R20230622) and one SDP solver. Mosek needs a licence;
 %     SeDuMi is the free fallback and is what the SOLVER field should be set to
-%     on a machine without one. The routine must ERROR with an actionable
-%     message when neither is on the path -- not fall through to a default that
-%     produces a wrong answer quietly.
+%     on a machine without one. The routine ERRORS with an actionable message
+%     when the requested solver is not on the path -- it does not silently
+%     substitute another one, because two benchmark rows produced by different
+%     solvers without saying so are worse than one missing row.
 %
-%   See also: VAN_DER_POL_ROA, PENDULUM_ROA.
+%   See also: VAN_DER_POL_ROA, PENDULUM_ROA, WRITE_ROA_FIXTURE.
 
-function [rho, V, info] = compute_roa_yalmip(f, x, V0, opts)
-    % 1. Validate inputs.
-    n = length(x);
-    assert(length(f) == n, 'length(f)=%d must equal length(x)=%d', length(f), n);
-    V0_at_origin = double(replace(V0, x, zeros(n,1)));
-    assert(abs(V0_at_origin) < 1e-12, 'V0 must vanish at the origin, got %e', V0_at_origin);
+% ---------------------------------------------------------------- validation
+n = length(x);
+assert(length(f) == n, 'length(f)=%d must equal length(x)=%d', length(f), n);
 
-    % 2. Fill defaults.
-    if nargin < 4, opts = struct(); end
-    defaults = struct(...
-        'epsilon', 1e-6, ...
-        'lambdaDegree', 2, ...
-        'constraints', {{}}, ...
-        'sigmaDegree', 2, ...
-        'rhoMax', [], ...
-        'bisectionTol', 1e-4, ...
-        'maxIter', 40, ...
-        'solver', 'mosek', ...
-        'verbose', 0);
-    fields = fieldnames(defaults);
-    for i = 1:numel(fields)
-        if ~isfield(opts, fields{i})
-            opts.(fields{i}) = defaults.(fields{i});
-        end
+V0_at_origin = double(replace(V0, x, zeros(n,1)));
+assert(abs(V0_at_origin) < 1e-12, ...
+       'V0 must vanish at the origin, got %e', V0_at_origin);
+
+f_at_origin = double(replace(f, x, zeros(n,1)));
+assert(max(abs(f_at_origin)) < 1e-12, ...
+       'f must vanish at the origin, got ||f(0)||_inf = %e', max(abs(f_at_origin)));
+
+% ------------------------------------------------------------------ defaults
+if nargin < 4, opts = struct(); end
+defaults = struct( ...
+    'epsilon',        1e-6, ...
+    'lambdaDegree',   2, ...
+    'constraints',    {{}}, ...
+    'sigmaDegree',    2, ...
+    'rhoMax',         [], ...
+    'bisectionTol',   1e-4, ...
+    'maxIter',        40, ...
+    'solver',         'mosek', ...
+    'verbose',        0, ...
+    'boundedRadius',  50, ...
+    'boundedSamples', 5000);
+fields = fieldnames(defaults);
+for i = 1:numel(fields)
+    if ~isfield(opts, fields{i})
+        opts.(fields{i}) = defaults.(fields{i});
     end
-    info.config = opts;
+end
 
-    % 3. Vdot = jacobian(V0, x) * f.
-    Vdot = jacobian(V0, x) * f;
-    if isa(Vdot, 'sdpvar')
-        Vdot = Vdot(1);
-    end
+% Resolve the environment BEFORE any solve, so a missing YALMIP or licence is
+% reported once, by name, rather than as a confusing failure inside the
+% bisection. Entry-point scripts call this too, before their first SDPVAR --
+% it is idempotent and cheap.
+opts.solver = assert_yalmip_env(opts.solver);
+info = struct();
+info.config = opts;
+info.solverResolved = opts.solver;
+settings = sdpsettings('solver', opts.solver, 'verbose', opts.verbose);
 
-    % 4. Check sublevel set boundedness: top-degree form of V0 positive definite.
-    V0_deg = degree(V0);
-    if V0_deg < 2
-        error('V0 must have degree at least 2 for bounded sublevel sets');
-    end
+% -------------------------------------------------------- Vdot and degrees
+% YALMIP's jacobian returns a ROW vector, so this is row-times-column. A
+% transpose slip here yields a scalar of the wrong sign and a certificate that
+% looks entirely plausible.
+Vdot = jacobian(V0, x) * f;
+if numel(Vdot) ~= 1
+    error('lyapunovToolbox:badVdot', ...
+          'Vdot should be scalar, got %d entries; check the jacobian orientation.', ...
+          numel(Vdot));
+end
 
-    % 5. Bracket rho.
-    rho = 1e-3;
-    found_infeasible = false;
+degV = degree(V0);
+if mod(degV, 2) ~= 0 || degV < 2
+    error('lyapunovToolbox:badCandidateDegree', ...
+          'V0 must have even degree >= 2, got %d.', degV);
+end
+
+% ------------------------------------------- (P1) positive definiteness of V0
+% V0 - epsilon*(x'x)^(degV/2) must be SOS. This is the hypothesis every later
+% step assumes and it was previously never checked.
+posExpr = V0 - opts.epsilon * (x' * x)^(degV/2);
+[posDiag, ~, posQ, posRes] = solvesos(sos(posExpr), [], settings, []);
+if posDiag.problem ~= 0
+    error('lyapunovToolbox:candidateNotPositive', ...
+          ['V0 - %g*(x''x)^%d is not SOS (solver status %d: %s). V0 is not a ' ...
+           'positive definite candidate at this margin; reduce epsilon or fix ' ...
+           'the Lyapunov solve.'], ...
+          opts.epsilon, degV/2, posDiag.problem, yalmiperror(posDiag.problem));
+end
+info.gramV = posQ{1};
+info.solverTime = posDiag.solvertime;
+
+% --------------------------------------------------------------- boundedness
+[isBounded, evidence] = check_boundedness(V0, x, degV, opts);
+info.bounded = isBounded;
+info.boundednessEvidence = evidence;
+if ~isBounded
+    error('lyapunovToolbox:unboundedSublevelSet', ...
+          ['The sublevel sets of V0 are not bounded (evidence: %s). Vdot < 0 on ' ...
+           'an unbounded set certifies nothing -- boundedness is a hypothesis of ' ...
+           'the ROA theorem, not a technicality.'], evidence);
+end
+
+% ------------------------------------------------------------------ bracket
+% Feasibility is MONOTONE in rho: a certificate for {V <= rho} is a certificate
+% for every smaller sublevel set, because that set is a subset. That is the
+% entire justification for bisecting a problem that is bilinear in (lambda, rho).
+% The status at each probe is not recorded: the routine re-solves at the level
+% it finally returns (see below), so info.solverStatus always describes THAT
+% solve rather than whichever bisection step happened to run last.
+bestRho       = [];       % assigned ONLY at a level a solver accepted
+rhoLo         = 0;
+info.iterations = 0;
+
+if isempty(opts.rhoMax)
+    rhoProbe       = 1e-3;
+    foundInfeasible = false;
     for doubling = 1:30
-        feasible = oracle(rho, V0, Vdot, x, opts);
-        if ~feasible
-            found_infeasible = true;
-            break;
-        end
-        rho = rho * 2;
-    end
-    if ~found_infeasible
-        error('lyapunovToolbox:globallyStable', ...
-              'No infeasible level found up to %e; system may be globally stable.', rho);
-    end
-    rho_hi = rho;
-    rho_lo = rho / 2;
-
-    % 6. Bisect.
-    info.iterations = 0;
-    info.solverTime = 0;
-    info.solverStatus = '';
-    info.bestRho = rho_lo;
-    for iter = 1:opts.maxIter
-        rho_mid = (rho_lo + rho_hi) / 2;
-        info.iterations = info.iterations + 1;
-        [feasible, sol_time, sol_status, lambda_val, sigma_vals] = oracle(rho_mid, V0, Vdot, x, opts);
-        info.solverTime = info.solverTime + sol_time;
-        if feasible
-            rho_lo = rho_mid;
-            info.bestRho = rho_mid;
-            info.solverStatus = sol_status;
-            info.lambda = lambda_val;
-            info.sigma = sigma_vals;
+        [ok, tsol] = oracle(rhoProbe, V0, Vdot, x, opts, settings);
+        info.solverTime = info.solverTime + tsol;
+        if ok
+            bestRho    = rhoProbe;
+            rhoLo      = rhoProbe;
+            rhoProbe   = rhoProbe * 2;
         else
-            rho_hi = rho_mid;
-            info.solverStatus = sol_status;
-        end
-        if (rho_hi - rho_lo) / max(1, rho_lo) < opts.bisectionTol
+            foundInfeasible = true;
+            rhoHi = rhoProbe;
             break;
         end
     end
+    if ~foundInfeasible
+        error('lyapunovToolbox:globallyStable', ...
+              ['No infeasible level found up to rho = %e after 30 doublings. ' ...
+               'For a globally stable system there is no finite boundary; pass ' ...
+               'opts.rhoMax explicitly if you want a capped estimate. Returning ' ...
+               'the cap as a certified level would be a silent over-estimate.'], ...
+              rhoProbe);
+    end
+else
+    rhoHi = opts.rhoMax;
+end
 
-    % 7. Return largest verified feasible rho.
-    rho = info.bestRho;
-    V = V0;
-    info.iterations = info.iterations;
+% ------------------------------------------------------------------ bisect
+for iter = 1:opts.maxIter
+    if (rhoHi - rhoLo) <= opts.bisectionTol * max(1, rhoLo)
+        break;
+    end
+    rhoMid = (rhoLo + rhoHi) / 2;
+    info.iterations = info.iterations + 1;
+    [ok, tsol] = oracle(rhoMid, V0, Vdot, x, opts, settings);
+    info.solverTime = info.solverTime + tsol;
+    if ok
+        bestRho    = rhoMid;
+        rhoLo      = rhoMid;
+    else
+        rhoHi = rhoMid;
+    end
+end
+
+if isempty(bestRho)
+    error('lyapunovToolbox:noFeasibleLevel', ...
+          ['No feasible rho found in (0, %e]. V0 is probably not a Lyapunov ' ...
+           'function for this field near the origin -- check the sign of Vdot ' ...
+           'and that the linearisation is Hurwitz.'], rhoHi);
+end
+
+% -------------------------------- final re-solve at the returned level
+% Re-solve at bestRho so the returned multipliers and Gram matrices belong to
+% the level actually reported. Without this the witness would be whichever
+% bisection step happened to run last, which is not necessarily bestRho.
+[ok, tsol, status, lambdaVal, sigmaVals, gramQ, gramRes] = ...
+    oracle(bestRho, V0, Vdot, x, opts, settings);
+info.solverTime = info.solverTime + tsol;
+if ~ok
+    error('lyapunovToolbox:reverificationFailed', ...
+          ['rho = %e was feasible during bisection but failed re-verification ' ...
+           '(status: %s). This is a numerical-reproducibility failure, not a ' ...
+           'tighter answer; do not use the level.'], bestRho, status);
+end
+
+rho = bestRho;
+V   = V0;
+
+info.solverStatus = status;
+info.lambda       = lambdaVal;
+info.sigma        = sigmaVals;
+info.gramLambda   = gramQ{1};
+info.gramVdot     = gramQ{end};
+info.gramResidual = max(abs([gramRes(:); posRes(:)]));
+minEig = min(eig((info.gramV + info.gramV')/2));
+for kQ = 1:numel(gramQ)
+    Qk = (gramQ{kQ} + gramQ{kQ}')/2;
+    minEig = min(minEig, min(eig(Qk)));
+end
+info.minEigQ = minEig;
+
+if opts.verbose
+    fprintf(['compute_roa_yalmip: rho=%.6g, %d bisection iters, solver=%s, ' ...
+             'time=%.2fs, gram residual=%.2e, min eig Q=%.2e, bounded via %s\n'], ...
+            rho, info.iterations, info.solverResolved, info.solverTime, ...
+            info.gramResidual, info.minEigQ, info.boundednessEvidence);
+end
+
+end % compute_roa_yalmip
+
+
+% =========================================================================
+function [feasible, solTime, statusStr, lambdaVal, sigmaVals, gramQ, gramRes] = ...
+    oracle(rho, V0, Vdot, x, opts, settings)
+%ORACLE  Inner feasibility solve for one candidate rho.
+
+[lambdaVal, cl] = polynomial(x, opts.lambdaDegree, 0);
+F    = sos(lambdaVal);
+expr = -(Vdot + opts.epsilon * (x' * x)) + lambdaVal * (V0 - rho);
+
+nCon       = numel(opts.constraints);
+sigmaVals  = cell(1, nCon);
+cs         = cell(1, nCon);
+for j = 1:nCon
+    [sigma_j, cs_j] = polynomial(x, opts.sigmaDegree, 0);
+    F              = [F, sos(sigma_j)];      %#ok<AGROW>
+    expr           = expr - sigma_j * opts.constraints{j};
+    sigmaVals{j}   = sigma_j;
+    cs{j}          = cs_j;
+end
+F = [F, sos(expr)];
+
+decisionVars = [cl; vertcat(cs{:})];
+[diagnostics, ~, gramQ, gramRes] = solvesos(F, [], settings, decisionVars);
+solTime = diagnostics.solvertime;
+
+switch diagnostics.problem
+    case 0
+        feasible  = true;
+        statusStr = 'feasible';
+    case 1
+        feasible  = false;
+        statusStr = 'infeasible';
+    case 4
+        % "Numerical problems". Treated as INFEASIBLE deliberately: accepting a
+        % marginal solve inflates rho, and an over-estimate of a certified ROA
+        % is a false certificate. This is the one direction of error this
+        % routine must never make.
+        feasible  = false;
+        statusStr = 'numerical_problems';
+    otherwise
+        error('lyapunovToolbox:solverError', ...
+              'Solver failed with status %d: %s', ...
+              diagnostics.problem, yalmiperror(diagnostics.problem));
+end
+
+if ~feasible
+    lambdaVal = [];
+    sigmaVals = {};
+    gramQ     = {};
+    gramRes   = 0;
+end
+
 end
 
 
-function [feasible, sol_time, status_str, lambda_val, sigma_vals] = oracle(rho, V0, Vdot, x, opts)
-    % Inner feasibility solve for a candidate rho.
-    [lambda_val, cl] = polynomial(x, opts.lambdaDegree, 0);
-    F = [sos(lambda_val)];
-    expr = -(Vdot + opts.epsilon * (x' * x)) + lambda_val * (V0 - rho);
-    sigma_vals = {};
-    cs = {};
-    for j = 1:numel(opts.constraints)
-        g_j = opts.constraints{j};
-        [sigma_j, cs_j] = polynomial(x, opts.sigmaDegree, 0);
-        F = [F, sos(sigma_j)];
-        expr = expr - sigma_j * g_j;
-        sigma_vals{end+1} = sigma_j;
-        cs{end+1} = cs_j;
+% =========================================================================
+function [isBounded, evidence] = check_boundedness(V0, x, degV, opts)
+%CHECK_BOUNDEDNESS  Is every sublevel set of V0 bounded?
+%
+%   Two tiers, matching is_sublevel_set_bounded in
+%   julia/src/polynomial_utils.jl:
+%
+%     1. Structural, and CONCLUSIVE. For a quadratic V0 = x'Px the question is
+%        exactly "P > 0", answerable from the Hessian with no solver.
+%     2. Sampling fallback, NOT a proof. Points on a large sphere: if V0 <= 0
+%        anywhere far out, the sublevel sets are certainly unbounded; if not,
+%        we have found no counterexample and say only that.
+%
+%   The caller records which tier it got. Reporting tier 2 as proof is the
+%   error this split exists to prevent.
+
+n = length(x);
+
+if degV == 2
+    P = double(hessian(V0, x)) / 2;
+    P = (P + P') / 2;
+    if min(eig(P)) > 0
+        isBounded = true;
+        evidence  = 'top_form_pd';
+        return;
     end
-    F = [F, sos(expr)];
-    all_decision_vars = [cl; vertcat(cs{:})];
-    settings = sdpsettings('solver', opts.solver, 'verbose', opts.verbose);
-    diagnostics = solvesos(F, [], settings, all_decision_vars);
-    sol_time = diagnostics.solvertime;
-    if diagnostics.problem == 0
-        feasible = true;
-        status_str = 'feasible';
-    elseif diagnostics.problem == 1 || diagnostics.problem == 4
-        feasible = false;
-        if diagnostics.problem == 1
-            status_str = 'infeasible';
-        else
-            status_str = 'numerical_problems';
-        end
-    else
-        error('lyapunovToolbox:solverError', ...
-              'Solver failed with status %d: %s', diagnostics.problem, yalmiperror(diagnostics.problem));
+    % A quadratic with a non-positive-definite Hessian has unbounded (or empty)
+    % sublevel sets. That is conclusive in the other direction.
+    isBounded = false;
+    evidence  = 'unbounded_witness';
+    return;
+end
+
+% Higher degree: sample a range of radii, not a single sphere. One sphere can
+% miss a narrow escape cone entirely, which would report an unbounded set as
+% bounded -- the dangerous direction.
+%
+% The evidence must not vary run to run, so the draw is seeded -- but a library
+% routine must not clobber the caller's stream, so the previous state is saved
+% and restored. Callers downstream of this (pendulum_roa's sampling study) seed
+% their own RNG and would otherwise inherit whatever was left here.
+rngState = rng;
+cleanupRng = onCleanup(@() rng(rngState));
+rng(20260804, 'twister');
+radii = opts.boundedRadius * [0.25, 0.5, 1.0];
+perR  = max(1, floor(opts.boundedSamples / numel(radii)));
+worst = Inf;
+for r = radii
+    for s = 1:perR
+        u  = randn(n, 1);
+        nu = norm(u);
+        if nu == 0, continue; end
+        pt = r * (u / nu);
+        worst = min(worst, double(replace(V0, x, pt)));
     end
+end
+
+if worst <= 0
+    isBounded = false;
+    evidence  = 'unbounded_witness';
+else
+    isBounded = true;
+    evidence  = 'sampling_only';
 end
 
 end

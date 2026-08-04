@@ -3,21 +3,41 @@
 Sum-of-Squares Lyapunov function synthesis and region-of-attraction estimation in
 Julia (SumOfSquares.jl), Python (bridge + plotting), and MATLAB (YALMIP+Mosek).
 
-[![CI](https://github.com/ali-eiman/lyapunov-toolbox/actions/workflows/ci.yml/badge.svg)](https://github.com/ali-eiman/lyapunov-toolbox/actions/workflows/ci.yml)
-[![Julia](https://img.shields.io/badge/julia-%3E%3D1.9-blue)](https://julialang.org)
+[![CI](https://github.com/ali-eiman/lyapunov-toolbox/actions/workflows/test.yml/badge.svg)](https://github.com/ali-eiman/lyapunov-toolbox/actions/workflows/test.yml)
+[![Julia](https://img.shields.io/badge/julia-%3E%3D1.10-blue)](https://julialang.org)
 [![Licence](https://img.shields.io/badge/licence-MIT-green)](LICENSE)
+
+> **Status: under review.** The implementation is complete but a code review is
+> open — see [REVIEW.md](REVIEW.md). Until those items are closed, the certified
+> levels this toolbox reports are not independently checked (R1-7 through R1-9 in
+> particular). Numeric results are deliberately absent from this file rather than
+> quoted from an unverified run; they will be filled from
+> [`docs/benchmarks.md`](docs/benchmarks.md) once regenerated.
 
 <table>
 <tr>
-  <td align="center"><strong>Van der Pol</strong><br>
-    <em>ρ = 2.97, 78% of true ROA</em></td>
-  <td align="center"><strong>Inverted Pendulum</strong><br>
-    <em>ρ = 0.48, certified to |θ| ≤ 0.71 rad</em></td>
-</tr><tr>
-  <td align="center"><strong>Unicycle + Obstacle</strong><br>
-    <em>ρ = 1.42, obstacle excluded via Putinar constraint</em></td>
-  <td align="center"><strong>Multi-Agent Consensus</strong><br>
-    <em>ρ = 2.14 in disagreement coordinates, N = 5 agents</em></td>
+  <td align="center" width="50%">
+    <img src="docs/figures/roa_van_der_pol.png" alt="Certified ROA of the reversed Van der Pol oscillator" width="100%"><br>
+    <strong>Van der Pol (reversed)</strong><br>
+    <em>Certified sublevel set against the exact limit-cycle boundary</em>
+  </td>
+  <td align="center" width="50%">
+    <img src="docs/figures/roa_inverted_pendulum.png" alt="Certified ROA of the LQR-stabilised inverted pendulum" width="100%"><br>
+    <strong>Inverted pendulum</strong><br>
+    <em>Taylor and exact trigonometric recastings compared</em>
+  </td>
+</tr>
+<tr>
+  <td align="center" width="50%">
+    <img src="docs/figures/roa_unicycle_obstacle.png" alt="Obstacle-free certified region for the unicycle" width="100%"><br>
+    <strong>Unicycle + obstacle</strong><br>
+    <em>Constrained certificate via Putinar multipliers</em>
+  </td>
+  <td align="center" width="50%">
+    <img src="docs/figures/roa_consensus.png" alt="Certified disagreement set for a multi-agent consensus network" width="100%"><br>
+    <strong>Multi-agent consensus</strong><br>
+    <em>Certified set in disagreement coordinates</em>
+  </td>
 </tr>
 </table>
 
@@ -25,115 +45,168 @@ Julia (SumOfSquares.jl), Python (bridge + plotting), and MATLAB (YALMIP+Mosek).
 
 This toolbox synthesises **Lyapunov functions** for polynomial (and
 polynomially-recast) nonlinear systems using sum-of-squares programming.
-For a given polynomial vector field $\dot x = f(x)$ with a locally
-asymptotically stable equilibrium at the origin, it produces:
+For a polynomial vector field $\dot x = f(x)$ with a locally asymptotically
+stable equilibrium $x_\mathrm{eq}$, it produces:
 
-1. a polynomial Lyapunov function $V(x)$,
+1. a polynomial Lyapunov function $V(x)$ vanishing at $x_\mathrm{eq}$,
 2. a certified sublevel set $\Omega_\rho = \{x : V(x) \le \rho\}$ that is
    positively invariant and contained in the true region of attraction,
 3. the Gram matrices and SOS multiplier certificates that let a third party
    **re-verify** the result without re-solving the SDP.
 
-It is written for researchers who need inner approximations of ROAs as
-building blocks for larger analysis problems (compositional stability of
-hybrid systems, transition-viable funnels, safety verification).
+The third item is the point. A certified level with no witness cannot be audited
+or composed; a certificate that carries its own Gram matrices can be checked by
+anyone with a linear-algebra library and no solver at all.
+
+It is written for researchers who need inner approximations of ROAs as building
+blocks for larger analysis problems (compositional stability of hybrid systems,
+transition-viable funnels, safety verification).
 
 ## What is implemented
 
 | Capability | Julia | MATLAB | Python |
 |---|---|---|---|
 | Fixed-$V$ $\rho$-bisection | ✅ | ✅ | via bridge |
-| $V$--$s$ iteration | ✅ | ✅ | via bridge |
+| $V$–$s$ iteration | ✅ | — | via bridge |
 | Shape-set expansion ($\beta$-step) | ✅ | — | via bridge |
 | Putinar constraints (obstacles, barriers) | ✅ | — | via bridge |
-| Trigonometric recasting (pendulum) | ✅ | — | via bridge |
-| Certificate verification (Gram check) | ✅ | ✅ | ✅ |
-| Plotting (ROA, phase portrait, $\dot V$) | — | — | ✅ |
-| Save/load certificates | ✅ | ✅ | ✅ |
+| Trigonometric recasting (pendulum, unicycle) | ✅ | — | via bridge |
+| Certificate verification (Gram check) | ✅ | — | via bridge |
+| Plotting (ROA, phase portrait, $\dot V$) | — | basic | ✅ |
+| Save/load certificates (JSON) | — | — | ✅ |
+
+The V–s iteration is Julia-side only, deliberately: `matlab/compute_roa_yalmip.m`
+is an *independent* implementation of the fixed-$V$ program against a different
+modelling layer and a different solver, and its value is that it shares no code
+with the Julia side. Making the two feature-equivalent would remove the only
+cross-check the repository has.
 
 ## Install
 
 ```bash
-# Julia dependencies
-cd julia && julia --project=. -e 'using Pkg; Pkg.instantiate()'
-
-# Python bridge + plotting
-cd python && pip install -e .
-
-# Tell the Python bridge where Julia lives
-export JULIA_PROJECT=$(pwd)/julia
+git clone https://github.com/ali-eiman/lyapunov-toolbox.git
+cd lyapunov-toolbox
 ```
+
+```bash
+julia --project=julia -e 'using Pkg; Pkg.instantiate()'
+```
+
+```bash
+pip install -e python
+```
+
+The Python bridge resolves the Julia project relative to the installed package,
+so no environment variable is needed for a normal checkout. To point it at a
+different one, set `LYAPUNOV_TOOLBOX_JULIA_PROJECT` (an absolute path to the
+`julia/` directory) and, optionally, `LYAPUNOV_TOOLBOX_BRIDGE` to `juliacall`
+(default) or `pyjulia`.
+
+MATLAB is optional and used only for cross-validation; it needs YALMIP plus one
+SDP solver (Mosek, or SeDuMi if you have no Mosek licence).
 
 ## Quickstart
 
 ```python
-from lyapunov_toolbox import get_session, certify_roa, synthesize
+from lyapunov_toolbox import certify_roa
 
-session = get_session()
-
-# Van der Pol, μ = 1, degree-4 Lyapunov candidate
-V, rho, certificate = synthesize(
-    system="van_der_pol", mu=1.0, degree=4, epsilon=1e-4
+# Reversed Van der Pol: the canonical ROA benchmark.
+cert = certify_roa(
+    ["-x2", "x1 + (x1^2 - 1)*x2"],
+    variables=("x1", "x2"),
+    V_degree=4,
 )
 
-print(f"Certified ρ = {rho:.3f}")
-print(f"Gram residual = {certificate.gram_residual():.1e}")
-certificate.save("vdp_cert.json")
+print(f"certified rho = {cert.rho:.4f}")
+print(f"V has degree {cert.degree} in {cert.n_vars} variables")
+print(f"bounded via {cert.boundedness_evidence}; verified = {cert.verified}")
+
+cert.save("vdp_cert.json")
 ```
+
+`certify_roa` returns a `RoaCertificate` — a frozen, picklable, JSON-serialisable
+value object holding no live Julia handle, so it can be evaluated, plotted, and
+stored on a machine with no Julia installed. Use `synthesize("van_der_pol", ...)`
+instead to run the full V–s iteration on one of the four built-in benchmark
+systems; it returns `(certificate, history)`.
 
 ## Results
 
-| System | $n$ | Degree | $\rho$ | ROA fraction | Time (s) |
-|---|---|---|---|---|---|
-| Van der Pol ($\mu = 1$) | 2 | 4 | 2.97 | 78% of limit cycle | 0.8 |
-| Van der Pol ($\mu = 1$) | 2 | 6 | 3.51 | 92% of limit cycle | 3.1 |
-| Inverted pendulum (trig) | 2 | 4 | 0.48 | $|\theta| \le 0.71$ rad | 1.2 |
-| Unicycle + obstacle | 3 | 4 | 1.42 | obstacle excluded | 4.7 |
-| Consensus ($N = 5$, disc.) | 4 | 4 | 2.14 | $\kappa \ge -0.2$ | 2.3 |
+Empty pending regeneration — see the status note at the top and
+[`docs/benchmarks.md`](docs/benchmarks.md). The systems and their dimensions are
+fixed by the code; the levels, volumes, and timings are not filled in here
+because `benchmark_row` does not currently run (REVIEW.md R1-2), and quoting
+numbers this repository cannot reproduce would defeat its purpose.
 
-The ROA fraction is the ratio of the certified area (Shoelace formula on
-the $V = \rho$ boundary) to the true limit-cycle area for Van der Pol, and
-the fraction of sampled interior points that converge under the true
-$\sin\theta$ dynamics for the pendulum.
+| System | $n$ | $\rho$ | ROA fraction | Time (s) |
+|---|---|---|---|---|
+| Van der Pol (reversed), $\mu = 1$ | 2 | — | — | — |
+| Inverted pendulum, Taylor-3 | 2 | — | — | — |
+| Inverted pendulum, exact trig recast | 3 | — | — | — |
+| Unicycle + circular obstacle | 4 | — | — | — |
+| 3-agent consensus (disagreement coords) | 2 | — | — | — |
+
+When filled, "ROA fraction" means two different things and the table will say
+which per row: for Van der Pol it is the ratio of certified area to the area
+enclosed by the forward system's limit cycle, which is the *exact* ROA boundary;
+for every other system it is against an empirical boundary from forward
+simulation at a stated horizon and grid, which is an estimate, not a proof.
 
 ## Examples
 
-| Example | Julia script | Python notebook |
+| Example | Julia script | Notebook |
 |---|---|---|
-| Van der Pol oscillator | `examples/van_der_pol/van_der_pol_demo.jl` | `examples/van_der_pol/van_der_pol_demo.ipynb` |
-| Inverted pendulum (trig + Taylor) | `examples/inverted_pendulum/inverted_pendulum_demo.jl` | `examples/inverted_pendulum/inverted_pendulum_demo.ipynb` |
-| Unicycle with circular obstacle | `examples/unicycle_with_obstacle/unicycle_demo.jl` | `examples/unicycle_with_obstacle/unicycle_demo.ipynb` |
-| Multi-agent consensus (adversarial) | `examples/multi_agent_consensus/consensus_demo.jl` | `examples/multi_agent_consensus/consensus_demo.ipynb` |
+| Van der Pol oscillator | [`van_der_pol_demo.jl`](examples/van_der_pol/van_der_pol_demo.jl) | [`van_der_pol_demo.ipynb`](examples/van_der_pol/van_der_pol_demo.ipynb) |
+| Inverted pendulum (trig + Taylor) | [`inverted_pendulum_demo.jl`](examples/inverted_pendulum/inverted_pendulum_demo.jl) | [`inverted_pendulum_demo.ipynb`](examples/inverted_pendulum/inverted_pendulum_demo.ipynb) |
+| Unicycle with circular obstacle | [`unicycle_demo.jl`](examples/unicycle_with_obstacle/unicycle_demo.jl) | [`unicycle_demo.ipynb`](examples/unicycle_with_obstacle/unicycle_demo.ipynb) |
+| Multi-agent consensus (adversarial switching) | [`consensus_demo.jl`](examples/multi_agent_consensus/consensus_demo.jl) | [`consensus_demo.ipynb`](examples/multi_agent_consensus/consensus_demo.ipynb) |
+
+The `.jl` scripts do the computation and exit non-zero on a failed assertion; the
+notebooks read their output and do the plotting and the prose. The notebooks are
+currently unwritten (REVIEW.md R1-5).
 
 ## Theory
 
-- **[`docs/theory_notes.md`](docs/theory_notes.md)** — notation, Lyapunov's
-  direct method, SOS parameterisation, the $\mathcal{S}$-procedure, Putinar
-  certificates, ROA computation, recasting, and numerical conditioning.
-- **[`docs/derivations/sos_decomposition.pdf`](docs/derivations/sos_decomposition.pdf)** —
-  Gram matrix parameterisation with a fully worked hand example, Motzkin's
-  non-SOS polynomial, and numerical reality.
-- **[`docs/derivations/positivstellensatz.pdf`](docs/derivations/positivstellensatz.pdf)** —
-  Putinar's Positivstellensatz, the $\mathcal{S}$-procedure specialisation,
-  the $V$--$s$ iteration, and the forward connection to transition-viable funnels.
+- **[`docs/theory_notes.md`](docs/theory_notes.md)** — notation mapped to code
+  identifiers, Lyapunov's direct method and the ROA corollary, the SOS
+  parameterisation, the $\mathcal{S}$-procedure, Putinar certificates, ROA
+  computation, recasting, and numerical conditioning.
+- **[`docs/derivations/sos_decomposition.tex`](docs/derivations/sos_decomposition.tex)** —
+  the Gram matrix parameterisation with a fully worked hand example, Motzkin's
+  nonnegative-but-not-SOS polynomial, and the numerical caveats.
+- **`docs/derivations/positivstellensatz.tex`** — Putinar's Positivstellensatz,
+  the $\mathcal{S}$-procedure specialisation, the V–s iteration, and the forward
+  connection to transition-viable funnels. **Not yet written** — the file is
+  currently a copy of `sos_decomposition.tex` (REVIEW.md R1-4).
+
+Compile the derivations with `latexmk -pdf` from inside `docs/derivations/`. The
+PDFs are build artifacts and are not committed.
 
 ## What this does not do
 
-- **Inner approximations only.** Nothing here provides an outer bound on
-  the ROA; the true ROA may be much larger than the certified set.
-- **No exact certificates.** All results are floating-point; rational
-  rounding (Peyrl--Parrilo, Powers--W\"ormann) is not implemented.
-- **No robustness guarantees.** No robust or common-Lyapunov formulation
-  exists in this codebase; additive disturbances, parameter mismatch, and
-  model error invalidate the certificates.
-- **The $V$--$s$ iteration is a local heuristic.** It has no convergence
-  guarantee to a global optimum; different seeds give different fixed
-  points (observed spread $\pm 6\%$ on Van der Pol, degree 4).
-- **Degree and dimension limits.** The monomial basis condition number
-  grows rapidly; beyond degree 8 in two variables or degree 4 in six
-  variables the SDP becomes numerically unreliable.
-- **Continuous-time only.** Discrete-time Lyapunov analysis is not
-  implemented.
+- **Inner approximations only.** Nothing here provides an outer bound on the ROA;
+  the true region may be much larger than the certified set. For outer
+  approximations, see the occupation-measure approach of Henrion & Korda.
+- **No exact certificates.** All results are floating-point. Rational rounding
+  (Peyrl–Parrilo, Powers–Wörmann) is not implemented, so a certificate holds to
+  the stated Gram residual, not exactly.
+- **No robustness guarantees.** There is no robust or common-Lyapunov formulation
+  in this codebase; additive disturbance, parameter mismatch, and model error all
+  invalidate the certificates.
+- **Infeasibility proves nothing.** Putinar's theorem gives no degree bound on the
+  multipliers, so an infeasible program means no certificate exists *at this
+  degree, in this basis, with this multiplier structure* — not that none exists.
+- **The V–s iteration is a local heuristic.** It is monotone in $\beta$ by
+  construction but has no convergence guarantee to a global optimum, and different
+  seeds reach different fixed points.
+- **Degree and dimension limits.** The Gram dimension is $\binom{n+d}{d}$ and the
+  monomial basis becomes ill-conditioned well before it becomes large. The
+  measured wall belongs in `docs/benchmarks.md` §2 and is not stated here until it
+  has been measured.
+- **A Taylor-recast certificate is about the truncated field**, not the original
+  system. No truncation-error bound is computed; the pendulum example measures the
+  gap empirically instead and reports where it opens.
+- **Continuous-time only.** Discrete-time Lyapunov analysis is not implemented.
 
 Naming the limits is what makes the claims above credible.
 
@@ -146,14 +219,16 @@ transition-viable funnels. To cite it in a paper:
 > `lyapunov-toolbox` (commit `abcdef`, https://github.com/ali-eiman/lyapunov-toolbox),
 > which wraps SumOfSquares.jl with Clarabel.
 
-Replace `abcdef` with the actual commit hash used.
+Replace `abcdef` with the commit actually used. Pin the commit rather than the
+version — `julia/Manifest.toml` is committed, so a pinned commit reproduces the
+exact solver stack.
 
 ## References
 
 1. P. A. Parrilo, *Structured Semidefinite Programs and Semialgebraic Geometry
    Methods in Robustness and Optimization*, Ph.D. thesis, Caltech, 2000.
 2. M. Putinar, "Positive polynomials on compact semi-algebraic sets," *Indiana
-   Univ. Math. J.*, vol. 42, no. 3, pp. 969--984, 1993.
+   Univ. Math. J.*, vol. 42, no. 3, pp. 969–984, 1993.
 3. Z. Jarvis-Wloszek, R. Feeley, W. Tan, K. Sun, and A. Packard, "Some controls
    applications of sum of squares programming," in *Proc. IEEE CDC*, 2003.
 4. U. Topcu, A. Packard, and P. Seiler, "Local stability analysis using
