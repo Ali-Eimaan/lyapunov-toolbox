@@ -55,9 +55,17 @@ class TestSessionStartup:
         msg = str(excinfo.value)
         assert s._backend in msg and other_backend in msg
         # Requesting a different project must also raise, naming both paths.
+        # Compare against the RESOLVED path: get_session resolves before
+        # comparing, and on Windows "/nonexistent/other/project" resolves to
+        # "C:\nonexistent\other\project", so asserting on the raw POSIX string
+        # fails on Windows for a message that is in fact correct.
+        from pathlib import Path
+        other_project = Path("/nonexistent/other/project").resolve()
         with pytest.raises(RuntimeError) as excinfo2:
-            get_session(project="/nonexistent/other/project")
-        assert "/nonexistent/other/project" in str(excinfo2.value)
+            get_session(project=str(other_project))
+        msg2 = str(excinfo2.value)
+        assert str(other_project) in msg2
+        assert str(s._project.resolve()) in msg2
 
     def test_missing_backend_error_names_the_fix(self):
         """With an invalid project path, error message contains Pkg.instantiate()."""
@@ -191,16 +199,25 @@ class TestCertifyRoa:
 
     @pytest.mark.julia
     def test_unverifiable_certificate_is_not_returned(self):
-        """An infeasible SOS program raises instead of returning a certificate."""
+        """A system that cannot be certified raises instead of returning one.
+
+        Uses the FORWARD Van der Pol, whose origin is unstable: there is no
+        Lyapunov function to find, so `lyapunov_from_linearization` raises on the
+        non-Hurwitz linearisation and the bridge must surface that rather than
+        hand back a certificate.
+
+        The previous version passed `V_degree=1` hoping the SOS program would be
+        infeasible. That stopped raising once the V-step basis was fixed to
+        include constant and linear terms, and "some setting I expect to fail"
+        is a fragile premise anyway — an unstable equilibrium is a case that
+        cannot be certified for a reason, not by accident.
+        """
         import pytest
 
         from lyapunov_toolbox.julia_bridge import JuliaBackendError, certify_roa
-        # V_degree=1 cannot be SOS positive-definite, so the program is
-        # infeasible; certify_roa must surface the failure rather than
-        # returning a bogus certificate.
         with pytest.raises((JuliaBackendError, ValueError)):
-            certify_roa("[-x2, x1 + (x1^2 - 1)*x2]", variables=("x1", "x2"),
-                        V_degree=1)
+            certify_roa("[x2, -x1 - (x1^2 - 1)*x2]", variables=("x1", "x2"),
+                        V_degree=2)
 
     @pytest.mark.julia
     @pytest.mark.slow

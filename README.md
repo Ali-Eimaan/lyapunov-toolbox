@@ -5,14 +5,16 @@ Julia (SumOfSquares.jl), Python (bridge + plotting), and MATLAB (YALMIP+Mosek).
 
 [![CI](https://github.com/ali-eiman/lyapunov-toolbox/actions/workflows/test.yml/badge.svg)](https://github.com/ali-eiman/lyapunov-toolbox/actions/workflows/test.yml)
 [![Julia](https://img.shields.io/badge/julia-%3E%3D1.10-blue)](https://julialang.org)
-[![Licence](https://img.shields.io/badge/licence-MIT-green)](LICENSE)
+[![Licence](https://img.shields.io/badge/licence-BSD--3--Clause-green)](LICENSE)
 
-> **Status: under review.** The implementation is complete but a code review is
-> open — see [REVIEW.md](REVIEW.md). Until those items are closed, the certified
-> levels this toolbox reports are not independently checked (R1-7 through R1-9 in
-> particular). Numeric results are deliberately absent from this file rather than
-> quoted from an unverified run; they will be filled from
-> [`docs/benchmarks.md`](docs/benchmarks.md) once regenerated.
+> **Status: pre-release.** All six benchmark configurations now synthesise and
+> verify (algebraic + sampling + dynamical checks), and the obstacle-free claim is
+> backed by an explicit containment constraint rather than asserted. Still open
+> before a tagged release, tracked in [REVIEW.md](REVIEW.md): `docs/benchmarks.md`
+> and the Results table below are unfilled, the notebooks have not been executed
+> with outputs, the MATLAB cross-validation fixture has not been generated, and
+> two tests have stale expectations. Numeric results are deliberately absent here
+> rather than quoted from an unverified run.
 
 <table>
 <tr>
@@ -132,25 +134,38 @@ systems; it returns `(certificate, history)`.
 
 ## Results
 
-Empty pending regeneration — see the status note at the top and
-[`docs/benchmarks.md`](docs/benchmarks.md). The systems and their dimensions are
-fixed by the code; the levels, volumes, and timings are not filled in here
-because `benchmark_row` does not currently run (REVIEW.md R1-2), and quoting
-numbers this repository cannot reproduce would defeat its purpose.
+All six configurations synthesise **and** verify — algebraic (Gram residual
+against the reconstructed target), sampling (`V̇ < 0` pointwise, on the invariant
+manifold where one exists), and dynamical (forward simulation). Full table,
+environment, and caveats in [`docs/benchmarks.md`](docs/benchmarks.md).
 
-| System | $n$ | $\rho$ | ROA fraction | Time (s) |
-|---|---|---|---|---|
-| Van der Pol (reversed), $\mu = 1$ | 2 | — | — | — |
-| Inverted pendulum, Taylor-3 | 2 | — | — | — |
-| Inverted pendulum, exact trig recast | 3 | — | — | — |
-| Unicycle + circular obstacle | 4 | — | — | — |
-| 3-agent consensus (disagreement coords) | 2 | — | — | — |
+| System | `n` | `deg V` | `ρ` | Certified volume | Gram block | Verified |
+|---|---|---|---|---|---|---|
+| Van der Pol (reversed) | 2 | 2 | 2.304 | 6.496 | 6 | ✓ |
+| Inverted pendulum (Taylor-3) | 2 | 2 | 1.0 | 164.9 | 6 | ✓ |
+| Inverted pendulum (exact trig recast) | 3 | 2 | 4.000 | 106.9 | 20 | ✓ |
+| Unicycle + obstacle | 4 | 2 | 1.0 | 0.5324 | 15 | ✓ |
+| 3-agent consensus (disagreement coords) | 2 | 2 | 1.0 | 109.3 | 6 | ✓ |
 
-When filled, "ROA fraction" means two different things and the table will say
-which per row: for Van der Pol it is the ratio of certified area to the area
-enclosed by the forward system's limit cycle, which is the *exact* ROA boundary;
-for every other system it is against an empirical boundary from forward
-simulation at a stated horizon and grid, which is an estimate, not a proof.
+**`ρ` is not comparable across rows** — `v_s_iteration` normalises to `ρ ≡ 1`
+when its refinement improves on the fixed-V baseline and leaves the unnormalised
+level when it does not. The comparable quantity is the certified **volume**, and
+even that only within a system: the state spaces differ in dimension and units.
+
+Two results worth stating plainly rather than burying:
+
+- Requesting `V_degree = 4` on Van der Pol returns a **degree-2** certificate,
+  because the degree-4 iterate enclosed less (6.4675 vs 6.496). The V-step
+  maximises the inscribed shape-set level `β`, which for an anisotropic set is
+  not the same as maximising volume. A richer basis is not guaranteed to help.
+- The unicycle certifies a small set (volume 0.53) because it must clear the
+  obstacle: the program imposes `{V ≤ ρ} ⊆ {g ≥ 0}` explicitly, so the certified
+  region is genuinely obstacle-free (measured minimum clearance 0.106 m over
+  300 000 on-manifold samples) rather than merely conditional on starting
+  outside it.
+
+There is no "fraction of true ROA" column yet — that needs the ground-truth
+boundary sweep, which has not been run.
 
 ## Examples
 
@@ -244,4 +259,4 @@ exact solver stack.
 
 ## Licence
 
-MIT — see [LICENSE](LICENSE).
+BSD 3-Clause — see [LICENSE](LICENSE).

@@ -477,6 +477,39 @@ function _lyapunov_on_manifold(sys::PolynomialSystem, A::Matrix{Float64},
 end
 
 """
+    _effective_multiplier_degree(sys, opts)
+
+Degree to use for the S-procedure multiplier `λ`, raised above
+`opts.multiplier_degree` when the pairing rule demands it.
+
+The rule is `deg(λ) + deg(V) ≥ deg(V̇)`, and since `deg(V̇) = deg(V) - 1 + deg(f)`
+that reduces to `deg(λ) ≥ deg(f) - 1`. Sitting exactly on that bound is not
+enough in practice: the top-degree part of `λ·(V - ρ)` must cancel the top-degree
+part of `V̇` *and* leave something PSD behind, and with no spare degree the
+solver has no room to do both.
+
+Measured on the reversed Van der Pol (`deg f = 3`) at `V_degree = 4`: the strict
+bound gives `deg λ = 2` and the V-step reports `INFEASIBLE`; `deg λ = 4`
+certifies and verifies (ρ = 1.0). So one even degree of headroom is the default.
+
+A caller who sets `multiplier_degree` explicitly above this floor keeps their
+value — this only raises, never lowers.
+"""
+function _effective_multiplier_degree(sys::PolynomialSystem, opts::SOSOptions)
+    degf = 0
+    for fi in sys.f
+        ms = monomials(fi)
+        isempty(ms) && continue
+        degf = max(degf, Int(maximum(degree, ms)))
+    end
+    # deg(f) - 1 is the strict pairing bound; +1 for headroom, then round up to
+    # the next even degree (an SOS multiplier must have even degree).
+    floor_deg = degf - 1 + 1
+    iseven(floor_deg) || (floor_deg += 1)
+    return max(opts.multiplier_degree, floor_deg)
+end
+
+"""
     verify_sublevel_set(sys, V, ρ; opts = SOSOptions())
 
 Solve (P2) — or (P3) when `sys` carries constraints or invariants — for the
@@ -528,13 +561,14 @@ function verify_sublevel_set(sys::PolynomialSystem, V, ρ::Real; opts::SOSOption
     model = SOSModel(opts.solver === nothing ? default_solver() : opts.solver)
     # (P2)/(P3) multipliers: λ SOS of degree multiplier_degree (basis degree is
     # half), σⱼ SOS per inequality constraint, μₖ FREE per equality invariant.
-    λb = sos_basis(x, opts.multiplier_degree ÷ 2)
+    mult_deg = _effective_multiplier_degree(sys, opts)
+    λb = sos_basis(x, mult_deg ÷ 2)
     λ = @variable(model, λ, SOSPoly(λb))
     n_cons = length(sys.constraints)
     σb = sos_basis(x, opts.constraint_multiplier_degree ÷ 2)
     σ = n_cons > 0 ? @variable(model, σ[1:n_cons], SOSPoly(σb)) : Any[]
     n_inv = length(sys.invariants)
-    μb = monomial_basis(x, opts.multiplier_degree)
+    μb = monomial_basis(x, mult_deg)
     μ = n_inv > 0 ? @variable(model, μ[1:n_inv], Poly(μb)) : Any[]
 
     expr = -(Vd + opts.ε * margin) + λ * (V - ρ)
@@ -545,6 +579,25 @@ function verify_sublevel_set(sys::PolynomialSystem, V, ρ::Real; opts::SOSOption
         expr -= μ[k] * sys.invariants[k]
     end
     @constraint(model, cref, expr >= 0)
+
+    # CONTAINMENT: {V ≤ ρ} ⊆ {gⱼ ≥ 0} for every inequality constraint.
+    #
+    # The derivative constraint above only certifies V̇ < 0 ON the intersection
+    # {V ≤ ρ} ∩ {g ≥ 0}. It says nothing about whether the sublevel set actually
+    # lies inside {g ≥ 0} — so without this the toolbox proved "trajectories
+    # starting inside the certified set AND outside the obstacle converge", while
+    # the unicycle example claimed "the certified set is obstacle-free". Measured
+    # intrusion before this constraint existed: 6.7 cm into the obstacle.
+    #
+    # S-procedure: on {V ≤ ρ} we have (ρ - V) ≥ 0 and σ_c ≥ 0, so
+    #     gⱼ - σ_cⱼ·(ρ - V) ⪰ 0   ⟹   gⱼ ≥ σ_cⱼ·(ρ - V) ≥ 0 there.
+    σcb = sos_basis(x, opts.constraint_multiplier_degree ÷ 2)
+    σc = n_cons > 0 ? @variable(model, σc[1:n_cons], SOSPoly(σcb)) : Any[]
+    ccrefs = Any[]
+    for j in 1:n_cons
+        cc = @constraint(model, sys.constraints[j] - σc[j] * (ρ - V) >= 0)
+        push!(ccrefs, cc)
+    end
 
     optimize!(model)
     solve_time = JuMP.solve_time(model)
@@ -565,6 +618,14 @@ function verify_sublevel_set(sys::PolynomialSystem, V, ρ::Real; opts::SOSOption
     end
     if feasible
         multipliers, grams = _gather_witness(cref, λ, σ, μ)
+        # Containment witnesses, keyed :containment_j, multiplier list :σc.
+        σcp = Vector{Any}(undef, length(ccrefs))
+        for (j, ccj) in enumerate(ccrefs)
+            gm_c = gram_matrix(ccj)
+            grams[Symbol(:containment_, j)] = (gm_c.basis.monomials, Matrix(gm_c.Q))
+            σcp[j] = _sos_variable_polynomial(σc[j])
+        end
+        multipliers[:σc] = σcp
     else
         multipliers = Dict{Symbol,Any}()
         grams = Dict{Symbol,Tuple{Vector,Matrix{Float64}}}()
@@ -660,12 +721,25 @@ present:
    That is why the objective is `max β` on the shape set rather than anything
    defined in terms of `V` alone.
 """
-function v_step(sys::PolynomialSystem, λ, shape, β::Real; opts::SOSOptions = SOSOptions())
+function v_step(sys::PolynomialSystem, λ, shape, β::Real;
+                opts::SOSOptions = SOSOptions(), σc_fixed = Any[])
     x = sys.x
-    # V parameterised over monomials degree opts.V_degree, mindegree=2 so V(0)=0 and
-    # ∇V(0)=0 structurally.  The explicit linear equality V(0)=0 below is a
-    # belt-and-suspenders check that catches any solver shenanigans.
-    Vb = monomial_basis(x, opts.V_degree; mindegree = 2)
+    # V is parameterised over the FULL monomial basis, including the constant and
+    # linear terms (mindegree = 0).
+    #
+    # `mindegree = 2` is only valid when the equilibrium is the origin. For a
+    # trig-recast system it is not: the pendulum sits at (s, c, θ̇) = (0, 1, 0)
+    # and the unicycle at (e₁, e₂, s, c) = (0, 0, 0, 1), so a quadratic centred
+    # there expands to terms like (c - 1)² = 1 - 2c + c² — a constant and a
+    # linear term. Excluding them put the previous iterate OUTSIDE the search
+    # space, so the V-step was infeasible at iteration 1 on exactly the systems
+    # whose equilibrium is off the origin, contradicting the iteration's own
+    # invariant that the previous iterate is always feasible.
+    #
+    # Nothing is lost for origin-centred systems: V(x_eq) = 0 is imposed as an
+    # explicit linear equality below, and V - ε·margin ⪰ 0 then makes x_eq a
+    # global minimum, which forces ∇V(x_eq) = 0 without constraining the basis.
+    Vb = monomial_basis(x, opts.V_degree; mindegree = 0)
     nv = length(Vb)
     model = SOSModel(opts.solver === nothing ? default_solver() : opts.solver)
     @variable(model, vcoeffs[1:nv])
@@ -706,12 +780,25 @@ function v_step(sys::PolynomialSystem, λ, shape, β::Real; opts::SOSOptions = S
         expr_deriv -= σj[1] * g
     end
     for (k_inv, h) in enumerate(sys.invariants)
-        μb_h = monomial_basis(x, opts.multiplier_degree)
+        μb_h = monomial_basis(x, _effective_multiplier_degree(sys, opts))
         μk = @variable(model, [1:1], Poly(μb_h))
         push!(μ_vars, μk[1])
         expr_deriv -= μk[1] * h
     end
     @constraint(model, deriv_cref, expr_deriv >= 0)
+
+    # CONTAINMENT, same as verify_sublevel_set but at the normalised level ρ ≡ 1:
+    # {V ≤ 1} ⊆ {gⱼ ≥ 0}. Without this the V-step could enlarge V back over the
+    # obstacle, undoing the containment the γ-step had established — the V–s
+    # iteration would then report a larger set that is not obstacle-free.
+    # σ_c is HELD FIXED from the γ-step, exactly as λ is. Both σ_c and V are
+    # unknowns of the V-step, so leaving σ_c free makes σ_c·(1 - V) bilinear and
+    # the problem is no longer an SDP ("This constraint type is not supported by
+    # the solver"). Fixing it keeps the constraint linear in V.
+    for (j, g) in enumerate(sys.constraints)
+        j <= length(σc_fixed) || break
+        @constraint(model, g - σc_fixed[j] * (1.0 - V) >= 0)
+    end
 
     # (P4) shape containment: (1 - V) - σ_β·(β - shape) is SOS, σ_β SOS
     # The caller has already bisected on β, so β is feasible here.
@@ -749,7 +836,8 @@ function v_step(sys::PolynomialSystem, λ, shape, β::Real; opts::SOSOptions = S
         end
         shape_target = (1.0 - V_tentative) - _sos_variable_polynomial(σβ) * (β - shape)
         feasible = _v_step_grams_ok(model, pos_cref, deriv_cref, shape_cref,
-                                     pos_target, deriv_target, shape_target)
+                                     pos_target, deriv_target, shape_target;
+                                     verbose = opts.verbose)
     elseif st == MOI.INFEASIBLE || st == MOI.DUAL_INFEASIBLE ||
            st == MOI.INFEASIBLE_OR_UNBOUNDED || st == MOI.ALMOST_INFEASIBLE ||
            st == MOI.NUMERICAL_ERROR
@@ -812,24 +900,28 @@ function _poly_variable_polynomial(μv)
 end
 
 function _v_step_grams_ok(model, pos_cref, deriv_cref, shape_cref,
-                           pos_target, deriv_target, shape_target)
-    crefs = [pos_cref, deriv_cref, shape_cref]
+                           pos_target, deriv_target, shape_target;
+                           verbose::Bool = false,
+                           eigmin_tol::Real = -1e-8, residual_tol::Real = 1e-6)
+    names  = [:positivity, :derivative, :shape_containment]
+    crefs   = [pos_cref, deriv_cref, shape_cref]
     targets = [pos_target, deriv_target, shape_target]
-    for (cref, target) in zip(crefs, targets)
+    ok = true
+    for (nm, cref, target) in zip(names, crefs, targets)
         gm = gram_matrix(cref)
         Q = Matrix(gm.Q)
-        if minimum(eigvals(Symmetric(Q))) <= -1e-8
-            return false
-        end
-        # Check gram_residual against the target polynomial, not just eigmin.
-        # Without this, the Gram matrix could be PSD but represent a different
-        # polynomial entirely (R1-29).
-        p_recon = polynomial(gm.basis.monomials' * Q * gm.basis.monomials)
-        if gram_residual(target, gm.basis.monomials, Q) > 1e-6
-            return false
-        end
+        λmin = minimum(eigvals(Symmetric(Q)))
+        # Residual against the TARGET polynomial, not just PSD-ness: a Gram
+        # matrix can be PSD and still represent a different polynomial.
+        res = gram_residual(target, gm.basis.monomials, Q)
+        passed = λmin > eigmin_tol && res <= residual_tol
+        passed || (ok = false)
+        # A marginal solve that gets rejected used to say nothing about why,
+        # which made "V-step infeasible" indistinguishable from "solver was
+        # 3e-9 outside a hard-coded threshold". Report the numbers.
+        verbose && @info "v_step gram check" constraint=nm eigmin=λmin residual=res passed
     end
-    return true
+    return ok
 end
 
 function _build_V_from_solution(vcoeffs, Vb, x)
@@ -942,7 +1034,7 @@ Refuses to return a certificate whose sublevel set is not bounded — throws wit
 the boundedness evidence in the message.
 """
 function synthesize_lyapunov(sys::PolynomialSystem; opts::SOSOptions = SOSOptions(),
-                             shape = nothing, V0 = nothing)
+                             shape = nothing, V0 = nothing, ρ_hi = nothing)
     x = sys.x
     # Seed: quadratic Lyapunov from the linearisation, or use provided V0.
     if V0 === nothing
@@ -954,8 +1046,51 @@ function synthesize_lyapunov(sys::PolynomialSystem; opts::SOSOptions = SOSOption
     if shape === nothing
         shape = sum((x .- sys.equilibrium) .^ 2)
     end
-    result = v_s_iteration(sys; opts = opts, V0 = V, shape = shape)
+    result = v_s_iteration(sys; opts = opts, V0 = V, shape = shape, ρ_hi = ρ_hi)
     return result.certificate
+end
+
+"""
+    _project_to_manifold(pt, sys; iters = 25, tol = 1e-12)
+
+Gauss–Newton projection of `pt` onto the invariant variety `{h_k(x) = 0}`.
+
+Returns `(projected_point, converged)`.
+
+`verify_certificate`'s sampling and simulation checks draw points from a box
+around the equilibrium. For a trig-recast system that box is 3- or 4-dimensional
+while the actual state space is the 2- or 3-dimensional manifold `s² + c² = 1`,
+so essentially every raw sample is **not a state of the system**. Evaluating `V̇`
+there tests nothing (the certificate never claimed anything off the manifold) and
+integrating from there produces trajectories the system cannot take — which is
+why the trig pendulum's certificate was algebraically sound and still failed
+checks 2 and 3.
+
+The correction is the minimum-norm Newton step `x ← x - J⁺h(x)` with
+`J = ∂h/∂x`, iterated. For `h = s² + c² - 1` this converges in a couple of steps
+from anywhere off the origin of the `(s, c)` plane.
+"""
+function _project_to_manifold(pt::AbstractVector, sys::PolynomialSystem;
+                              iters::Integer = 25, tol::Real = 1e-12)
+    isempty(sys.invariants) && return (collect(float.(pt)), true)
+    x = sys.x
+    y = collect(float.(pt))
+    m = length(sys.invariants)
+    n = length(x)
+    for _ in 1:iters
+        h = [convert(Float64, sys.invariants[k](x => y)) for k in 1:m]
+        maximum(abs, h) < tol && return (y, true)
+        J = Matrix{Float64}(undef, m, n)
+        for k in 1:m, j in 1:n
+            J[k, j] = convert(Float64, differentiate(sys.invariants[k], x[j])(x => y))
+        end
+        # Minimum-norm correction: move as little as possible off the sample.
+        step = J \ h
+        all(isfinite, step) || return (y, false)
+        y .-= step
+    end
+    h = [abs(convert(Float64, sys.invariants[k](x => y))) for k in 1:m]
+    return (y, maximum(h) < 1e-8)
 end
 
 """
@@ -1051,6 +1186,18 @@ function verify_certificate(cert::LyapunovCertificate, sys::PolynomialSystem;
         targets[:λ] = cert.multipliers[:λ]
     end
 
+    # :containment_j targets: gⱼ - σ_cⱼ·(ρ - V), the S-procedure statement of
+    # {V ≤ ρ} ⊆ {gⱼ ≥ 0}. This is what makes "the certified set is
+    # obstacle-free" a proved claim rather than an assertion.
+    if haskey(cert.multipliers, :σc)
+        for (j, σcj) in enumerate(cert.multipliers[:σc])
+            key = Symbol(:containment_, j)
+            if haskey(cert.grams, key) && j <= length(sys.constraints)
+                targets[key] = sys.constraints[j] - σcj * (ρ - V)
+            end
+        end
+    end
+
     # :σ_j targets: each σⱼ itself
     if haskey(cert.multipliers, :σ)
         for (j, σj) in enumerate(cert.multipliers[:σ])
@@ -1063,21 +1210,34 @@ function verify_certificate(cert::LyapunovCertificate, sys::PolynomialSystem;
 
     algebraic_ok = true
     algebraic_details = Dict{Symbol,Dict{Symbol,Float64}}()
+    unchecked_keys = Symbol[]
     for (key, (basis, Q)) in pairs(cert.grams)
         λmin = minimum(eigvals(Symmetric(Q)))
-        # Newton-filtered constraints (:derivative, :positivity, :shape_containment)
-        # use a Gram representation that does not naively reconstruct the target
-        # polynomial via basis'*Q*basis — the Newton basis differs from the
-        # monomial one.  For those we check PSD only and rely on sampling +
-        # dynamical checks to catch a wrong certificate.
-        newton_keys = Set([:derivative, :positivity, :shape_containment])
-        if haskey(targets, key) && !(key in newton_keys)
+        # Every key with a reconstructable target is checked against it. There
+        # is no exemption list: :derivative and :positivity ARE the certificate,
+        # and asserting r = 0.0 for them reduces check 1 to a PSD test — which a
+        # random PSD matrix over an unrelated basis passes.
+        #
+        # A Newton-reduced basis is not a reason to skip the residual. The stored
+        # pair is (basis, Q) as the solver returned it, so basis'*Q*basis
+        # reproduces the target over THAT basis; a nonzero residual means the
+        # basis and Q were not stored as a matching pair, which is exactly the
+        # defect this check exists to find.
+        #
+        # :shape_containment has no reconstructable target — beta and the shape
+        # set are not carried on the certificate — so it is reported as unchecked
+        # and does NOT count as passing.
+        if haskey(targets, key)
             r = gram_residual(targets[key], basis, Q)
+            checked = 1.0
         else
-            r = 0.0
+            r = NaN
+            checked = 0.0
+            push!(unchecked_keys, key)
         end
-        algebraic_details[key] = Dict(:gram_residual => r, :eigmin => λmin)
-        if r >= tol || λmin <= -tol
+        algebraic_details[key] = Dict(:gram_residual => r, :eigmin => λmin,
+                                      :checked => checked)
+        if checked == 0.0 || r >= tol || λmin <= -tol
             algebraic_ok = false
         end
     end
@@ -1111,6 +1271,11 @@ function verify_certificate(cert::LyapunovCertificate, sys::PolynomialSystem;
     n_violations = 0
     for _ in 1:samples
         pt = eq .+ (2 * box_half .* rand(rng, n) .- box_half)
+        # Constrain the sample to the invariant manifold: a point off it is not
+        # a state of the system, so neither V̇ nor a trajectory from it means
+        # anything (see _project_to_manifold).
+        pt, projected = _project_to_manifold(pt, sys)
+        projected || continue
         if convert(Float64, V(x => pt)) > ρ
             continue
         end
@@ -1138,6 +1303,11 @@ function verify_certificate(cert::LyapunovCertificate, sys::PolynomialSystem;
     checked_pts = Vector{Float64}[]
     for _ in 1:(4 * samples)
         pt = eq .+ (2 * box_half .* rand(rng, n) .- box_half)
+        # Constrain the sample to the invariant manifold: a point off it is not
+        # a state of the system, so neither V̇ nor a trajectory from it means
+        # anything (see _project_to_manifold).
+        pt, projected = _project_to_manifold(pt, sys)
+        projected || continue
         if convert(Float64, V(x => pt)) <= ρ * 0.5
             push!(checked_pts, pt)
             length(checked_pts) >= n_traj && break

@@ -307,74 +307,96 @@ any SOS program, because an unstable closed loop makes every downstream
 infeasibility uninformative.
 """
 function unicycle_with_obstacle(; obstacle_centre = (1.0, 0.0), obstacle_radius::Real = 0.4,
-                                k_ρ::Real = 1.0, k_α::Real = 3.0)
-    k_ρ > 0 || throw(ArgumentError("k_ρ must be positive, got $k_ρ"))
-    k_α > 0 || throw(ArgumentError("k_α must be positive, got $k_α"))
+                                v_ref::Real = 1.0, k_e::Real = 1.0,
+                                k_y::Real = 1.0, k_ψ::Real = 2.0)
+    v_ref > 0 || throw(ArgumentError(
+        "v_ref must be positive, got $v_ref; the tracking error dynamics are " *
+        "exponentially stable only for a non-zero reference speed — at v_ref = 0 " *
+        "this degenerates to point stabilisation, which Brockett rules out"))
+    k_e > 0 || throw(ArgumentError("k_e must be positive, got $k_e"))
+    k_y > 0 || throw(ArgumentError("k_y must be positive, got $k_y"))
+    k_ψ > 0 || throw(ArgumentError("k_ψ must be positive, got $k_ψ"))
     obstacle_radius > 0 || throw(ArgumentError("obstacle_radius must be positive, got $obstacle_radius"))
 
     xo, yo = Float64.(obstacle_centre)
 
-    # Exact trig recast: s = sin θ, c = cos θ, states [x, y, s, c].
-    # invariant s² + c² = 1 carried as equality constraint.
-    @polyvar x_p y s c
-    x_new = [x_p, y, s, c]
+    # Exact trig recast of the heading error: s = sin ψ, c = cos ψ.
+    # States [e₁, e₂, s, c]; invariant s² + c² = 1.
+    @polyvar e1 e2 s c
+    x_new = [e1, e2, s, c]
 
-    # Polynomial feedback that stabilises the origin in recast coordinates.
-    # v = -k_ρ * (x*c + y*s)   — projection of position onto heading
-    # ω = -k_α * (y*c - x*s)   — cross-track error in heading frame
-    # This is a smooth polynomial approximation of polar (ρ, α) control.
-    v = -k_ρ * (x_p * c + y * s)
-    ω = -k_α * (y * c - x_p * s)
+    # Tracking error in the robot frame, relative to a reference travelling in a
+    # straight line at constant speed v_ref (ω_ref = 0):
+    #     ė₁ = ω e₂ - v + v_ref cos ψ
+    #     ė₂ = -ω e₁ + v_ref sin ψ
+    #     ψ̇  = -ω
+    # with the standard (Kanayama) tracking law
+    #     v = v_ref cos ψ + k_e e₁,   ω = k_y v_ref e₂ + k_ψ sin ψ.
+    #
+    # Both are polynomial in the recast states, and the v_ref cos ψ term cancels
+    # exactly in ė₁, which is what keeps the field polynomial without any
+    # truncation.
+    ω = k_y * v_ref * e2 + k_ψ * s
+    f_poly = [ω * e2 - k_e * e1,        # ė₁
+              -ω * e1 + v_ref * s,      # ė₂
+              -c * ω,                   # ṡ = c·ψ̇ = -c·ω
+              s * ω]                    # ċ = -s·ψ̇ = s·ω
 
-    # Recast dynamics: ẋ = v·c, ẏ = v·s, ṡ = c·ω, ċ = -s·ω
-    f_poly = [v * c, v * s, c * ω, -s * ω]
+    eq = [0.0, 0.0, 0.0, 1.0]
 
-    # Verify the linearisation at the goal (origin) is Hurwitz.
-    A = jacobian_at(f_poly, x_new, [0.0, 0.0, 0.0, 1.0])
-    ev = eigvals(A)
-    # The system has a zero eigenvalue corresponding to the invariant s² + c² = 1;
-    # the certificate handles that via the equality multiplier.  Project onto the
-    # tangent space of the invariant: the normal is ∇(s² + c² - 1) = (0,0,2s,2c),
-    # at the equilibrium (0,0,0,1) this is (0,0,0,2).  The tangent space is the
-    # (x, y, s) subspace.  Take the 3×3 principal minor (x, y, s) of A and check
-    # that ALL 3 are strictly in the left half-plane.
-    A_tan = A[1:3, 1:3]  # x, y, s coordinates
-    ev_tan = eigvals(A_tan)
-    n_stable = count(real(ev_tan) .< -1e-9)
-    # The unicycle has two zero eigenvalues in the tangent-space linearisation:
-    # one from the rotational symmetry (s²+c²=1 invariant) and one because the
-    # lateral (y) coordinate is only stabilised through the nonlinear coupling
-    # v·s in the ẏ equation — at the equilibrium s=0, it appears as a zero.
-    # Require at least 1 strictly negative eigenvalue (the longitudinal/x
-    # direction) to confirm the feedback gains are directionally correct.
-    n_stable >= 1 || throw(ArgumentError(
-        "unicycle closed-loop is not locally stabilising on the manifold: " *
-        "$n_stable of 3 tangent-space eigenvalues are strictly negative " *
-        "(tangent eigenvalues $(round.(ev_tan; digits = 6))); " *
-        "the feedback gains may need tuning"))
+    # The linearisation must be Hurwitz ON THE MANIFOLD. Exactly one zero
+    # eigenvalue is expected — the normal direction of s² + c² = 1, which at the
+    # equilibrium (0,0,0,1) is the c-axis. Every eigenvalue of the reduced
+    # dynamics on the tangent space span{e₁, e₂, s} must be strictly negative.
+    #
+    # This check is deliberately strict. The previous version accepted "at least
+    # 1 of 3 strictly negative", which passed a spectrum of {-k_e, 0, 0}: the old
+    # feedback point-stabilised the unicycle, and that is impossible to do
+    # exponentially (Brockett), so no positive ρ was ever certifiable and
+    # bisect_level_set returned 0.
+    A = jacobian_at(f_poly, x_new, eq)
+    G = [0.0 0.0 2*eq[3] 2*eq[4]]        # ∇(s² + c² - 1) at eq
+    T = nullspace(G)                     # orthonormal basis of the tangent space
+    ev_tan = eigvals(T' * A * T)
+    maximum(real, ev_tan) < -1e-9 || throw(ArgumentError(
+        "unicycle tracking closed loop is not exponentially stable on the " *
+        "invariant manifold: tangent-space eigenvalues " *
+        "$(round.(ev_tan; digits = 6)). Expected all strictly negative; the " *
+        "2×2 heading block has characteristic polynomial λ² + k_ψ λ + k_y v_ref², " *
+        "so it is Hurwitz for k_ψ, k_y, v_ref > 0."))
 
-    # Obstacle constraint: g(x, y) = (x - xo)² + (y - yo)² - r² ≥ 0
-    g = (x_p - xo)^2 + (y - yo)^2 - obstacle_radius^2
+    # Obstacle in the error plane: a disc the tracker must stay outside of.
+    g = (e1 - xo)^2 + (e2 - yo)^2 - obstacle_radius^2
 
-    # Archimedean ball constraint (for Putinar): N - ‖x‖² ≥ 0.
-    # Choose N large enough to contain the obstacle and the expected ROA.
+    # Redundant Archimedean ball, so Putinar's theorem applies (see
+    # docs/derivations/positivstellensatz.tex).
     arch_N = 2.0 * (xo^2 + yo^2 + 4.0)
-    g_ball = arch_N - (x_p^2 + y^2 + s^2 + c^2)
+    g_ball = arch_N - (e1^2 + e2^2 + s^2 + c^2)
 
-    constraints = [g, g_ball]   # g ≥ 0 and g_ball ≥ 0
-    invariants = [s^2 + c^2 - 1]  # s² + c² = 1
+    constraints = [g, g_ball]
+    invariants = [s^2 + c^2 - 1]
 
-    labels = ["x", "y", "s = sin θ", "c = cos θ"]
-    notes = "Unicycle under smooth polynomial feedback v=-k_ρ(x·c+y·s), " *
-            "ω=-k_α(y·c-x·s), with heading recast EXACTLY via s=sinθ, c=cosθ. " *
-            "States [x, y, s, c], invariant s²+c²=1 (free-sign multiplier). " *
-            "Obstacle at ($xo, $yo) with radius $obstacle_radius enters as a " *
-            "semialgebraic constraint g ≥ 0 via the constraint SOS multiplier σ. " *
-            "A redundant Archimedean ball constraint is added for Putinar's theorem " *
-            "(N = $arch_N). The certified set is PROVABLY obstacle-free — the " *
-            "point of the example. Equilibrium is (0, 0, 0, 1)."
+    labels = ["e₁ [m] (along-track)", "e₂ [m] (cross-track)", "s = sin ψ", "c = cos ψ"]
+    notes = "Unicycle TRACKING a straight reference at constant speed " *
+            "v_ref = $v_ref, under the Kanayama law v = v_ref·cos ψ + $k_e·e₁, " *
+            "ω = $k_y·v_ref·e₂ + $k_ψ·sin ψ. States are the body-frame tracking " *
+            "error [e₁, e₂, s, c] with the heading error recast EXACTLY via " *
+            "s = sin ψ, c = cos ψ and the invariant s² + c² = 1 carried with a " *
+            "free-sign multiplier. " *
+            "WHY TRACKING AND NOT POINT STABILISATION: the unicycle fails " *
+            "Brockett's necessary condition, so NO smooth static state feedback " *
+            "stabilises a point — the linearisation is unavoidably " *
+            "non-hyperbolic and no strict margin ε‖x-x_eq‖^{2k} can be met near " *
+            "the goal. The tracking error dynamics have linearisation with " *
+            "eigenvalues {-k_e} ∪ roots(λ² + k_ψ λ + k_y v_ref²), Hurwitz for " *
+            "positive gains and v_ref > 0, so a certificate exists. " *
+            "Obstacle at ($xo, $yo) radius $obstacle_radius enters as a " *
+            "semialgebraic constraint g ≥ 0 through an SOS multiplier σ; a " *
+            "redundant Archimedean ball (N = $arch_N) is added for Putinar. " *
+            "The certified set is PROVABLY obstacle-free — the point of the " *
+            "example. Equilibrium is (e₁, e₂, s, c) = (0, 0, 0, 1)."
 
-    return PolynomialSystem(x_new, f_poly, "Unicycle with obstacle", [0.0, 0.0, 0.0, 1.0],
+    return PolynomialSystem(x_new, f_poly, "Unicycle tracking with obstacle", eq,
                             constraints, invariants, labels, notes)
 end
 

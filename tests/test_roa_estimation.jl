@@ -60,145 +60,127 @@ using LyapunovToolbox
         @testset "quadratic V gives a certified set inside the limit cycle" begin
             sys = van_der_pol(; reversed = true)
             V = lyapunov_from_linearization(sys)
-            # bisect_level_set may throw when the SOS solver accepts
-            # every ρ as feasible (numerical limitation at extreme scale).
-            # In that case skip the limit-cycle containment check.
-            local ρ_test
-            local bisect_ok = true
-            try
-                ρ_test, _, _, _ = bisect_level_set(sys, V)
-            catch e
-                if e isa ErrorException
-                    @test_skip "bisect_level_set: solver accepts unbounded ρ (numerical limitation)"
-                    bisect_ok = false
-                else
-                    rethrow()
+            # No try/catch here. If bisect_level_set throws, that is the result:
+            # the reference system failing to certify is the single most
+            # important thing this suite can tell you, and catching it turned a
+            # failure into a skip.
+            ρ_test, _, _, _ = bisect_level_set(sys, V)
+            @test ρ_test > 0
+            # Compute the forward system's limit cycle via Poincaré section at y=0.
+            fwd_sys = van_der_pol(; reversed = false)
+            x0_fwd = [2.0, 0.0]  # outside limit cycle
+            T_fwd, X_fwd, _ = simulate(fwd_sys, x0_fwd, (0.0, 50.0))
+            # Extract exactly one period of the stable orbit by finding two
+            # consecutive upward crossings of y=0.
+            crossings = Int[]
+            for i in 2:(length(T_fwd)-1)
+                if X_fwd[i, 2] < 0 && X_fwd[i+1, 2] >= 0
+                    push!(crossings, i)
                 end
             end
-            if bisect_ok
-                # Compute the forward system's limit cycle via Poincaré section at y=0.
-                fwd_sys = van_der_pol(; reversed = false)
-                x0_fwd = [2.0, 0.0]  # outside limit cycle
-                T_fwd, X_fwd, _ = simulate(fwd_sys, x0_fwd, (0.0, 50.0))
-                # Extract exactly one period of the stable orbit by finding two
-                # consecutive upward crossings of y=0.
-                crossings = Int[]
-                for i in 2:(length(T_fwd)-1)
-                    if X_fwd[i, 2] < 0 && X_fwd[i+1, 2] >= 0
-                        push!(crossings, i)
-                    end
-                end
-                if length(crossings) >= 2
-                    period_start = crossings[end-1]
-                    period_end = crossings[end]
-                    cycle = [X_fwd[i, :] for i in period_start:period_end]
-                else
-                    # Fallback: take last 30% of trajectory as an approximation.
-                    half = div(3 * size(X_fwd, 1), 4)
-                    cycle = [X_fwd[i, :] for i in half:size(X_fwd, 1)]
-                end
-                # Every point of the certified boundary must lie strictly inside
-                # the limit cycle.  Check via ray-casting (point-in-polygon) against
-                # the closed cycle polygon, not just distance > 0 (which passes if
-                # the boundary is OUTSIDE the cycle — the opposite of what we need).
-                boundary = roa_boundary_2d(V, ρ_test, sys.x; xlim = (-3, 3), ylim = (-3, 3))
-                for (bx, by) in boundary
-                    inside = LyapunovToolbox._point_in_polygon(bx, by, cycle)
-                    @test inside  # boundary point ($bx, $by) is outside the limit cycle; the certified set is NOT a subset of the true ROA
-                end
+            if length(crossings) >= 2
+                period_start = crossings[end-1]
+                period_end = crossings[end]
+                cycle = [X_fwd[i, :] for i in period_start:period_end]
+            else
+                # Fallback: take last 30% of trajectory as an approximation.
+                half = div(3 * size(X_fwd, 1), 4)
+                cycle = [X_fwd[i, :] for i in half:size(X_fwd, 1)]
+            end
+            # Every point of the certified boundary must lie strictly inside
+            # the limit cycle.  Check via ray-casting (point-in-polygon) against
+            # the closed cycle polygon, not just distance > 0 (which passes if
+            # the boundary is OUTSIDE the cycle — the opposite of what we need).
+            boundary = roa_boundary_2d(V, ρ_test, sys.x; xlim = (-3, 3), ylim = (-3, 3))
+            for (bx, by) in boundary
+                inside = LyapunovToolbox._point_in_polygon(bx, by, cycle)
+                @test inside  # boundary point is outside the limit cycle; the certified set is NOT a subset of the true ROA
             end
         end
 
-        @testset "certified area is a nontrivial fraction of the true ROA" begin
-            # Skipped in CI: true_roa_boundary_2d requires hundreds of trajectories.
-            # Run with `julia --project=. -e 'include("tests/test_roa_estimation.jl")'`
-            # for the full validation.
-            @test_skip "requires trajectory-based ground truth (hundreds of sims); run manually"
-        end
+    end
 
-        @testset "degree-4 V beats degree-2, degree-6 beats degree-4" begin
-            # Skipped in CI: calls synthesize_lyapunov 3×, each running the V-S
-            # algorithm with multiple SOS solves — takes ~10+ minutes.
-            @test_skip "requires ~10 minutes of SDP computation (multiple V-S iterations); run manually"
-        end
+    @testset "certified area is a nontrivial fraction of the true ROA" begin
+        # Skipped in CI: true_roa_boundary_2d requires hundreds of trajectories.
+        # Run with `julia --project=. -e 'include("tests/test_roa_estimation.jl")'`
+        # for the full validation.
+        @test_skip "requires trajectory-based ground truth (hundreds of sims); run manually"
+    end
 
-        @testset "forward Van der Pol cannot be certified" begin
-            sys = van_der_pol(; reversed = false)
-            @test_throws ArgumentError synthesize_lyapunov(sys)
+    @testset "degree-4 V beats degree-2, degree-6 beats degree-4" begin
+        # Skipped in CI: calls synthesize_lyapunov 3×, each running the V-S
+        # algorithm with multiple SOS solves — takes ~10+ minutes.
+        @test_skip "requires ~10 minutes of SDP computation (multiple V-S iterations); run manually"
+    end
+
+    @testset "forward Van der Pol cannot be certified" begin
+        sys = van_der_pol(; reversed = false)
+        @test_throws ArgumentError synthesize_lyapunov(sys)
+    end
+end
+
+@testset "v_s_iteration" begin
+    @testset "beta is monotonically non-decreasing" begin
+        sys = van_der_pol(; reversed = true)
+        result = v_s_iteration(sys; opts = SOSOptions(vs_iterations = 5))
+        β_hist = result.β_history
+        for i in 2:length(β_hist)
+            @test β_hist[i] >= β_hist[i-1] - 1e-8  # β decreased from $(β_hist[i-1]) to $(β_hist[i]) at position $i
         end
     end
 
-    @testset "v_s_iteration" begin
-        @testset "beta is monotonically non-decreasing" begin
-            sys = van_der_pol(; reversed = true)
-            result = v_s_iteration(sys; opts = SOSOptions(vs_iterations = 5))
-            β_hist = result.β_history
-            for i in 2:length(β_hist)
-                @test β_hist[i] >= β_hist[i-1] - 1e-8  # β decreased from $(β_hist[i-1]) to $(β_hist[i]) at position $i
-            end
-        end
-
-        @testset "improves on fixed-V bisection" begin
-            sys = van_der_pol(; reversed = true)
-            V = lyapunov_from_linearization(sys)
-            cert_fixed = estimate_roa(sys, V)
-            vol_fixed, _ = roa_volume(V, cert_fixed.ρ, sys.x; method = :grid)
-            result = v_s_iteration(sys; opts = SOSOptions(vs_iterations = 5))
-            vol_vs, _ = roa_volume(result.certificate.V, result.certificate.ρ, sys.x;
-                                   method = :grid)
-            @test vol_vs >= vol_fixed * 0.99  # V–s iteration volume ($vol_vs) ≪ fixed-V volume ($vol_fixed)
-        end
-
-        @testset "V-step is never infeasible" begin
-            sys = van_der_pol(; reversed = true)
-            # Should not throw — the V-step must always be feasible.
-            result = v_s_iteration(sys; opts = SOSOptions(vs_iterations = 3))
-            @test result.converged || !result.converged  # just checking no throw
-        end
-
-        @testset "reports converged=false when the budget runs out" begin
-            sys = van_der_pol(; reversed = true)
-            result = v_s_iteration(sys; opts = SOSOptions(vs_iterations = 1))
-            # With the improved v-step formulation, a single iteration may actually
-            # converge. The key property is that the result contains a valid certificate.
-            @test result.certificate isa LyapunovCertificate  # budget was tight but result is valid
-        end
-
-        @testset "every intermediate V is itself a valid certificate" begin
-            sys = van_der_pol(; reversed = true)
-            result = v_s_iteration(sys; opts = SOSOptions(vs_iterations = 3))
-            V_final = result.certificate.V
-            ρ_final = result.certificate.ρ
-            # Verify the final certificate.
-            vresult = verify_certificate(result.certificate, sys)
-            @test vresult.algebraic.ok && vresult.sampling.ok && vresult.dynamical.ok
-        end
+    @testset "improves on fixed-V bisection" begin
+        sys = van_der_pol(; reversed = true)
+        V = lyapunov_from_linearization(sys)
+        cert_fixed = estimate_roa(sys, V)
+        vol_fixed, _ = roa_volume(V, cert_fixed.ρ, sys.x; method = :grid)
+        result = v_s_iteration(sys; opts = SOSOptions(vs_iterations = 5))
+        vol_vs, _ = roa_volume(result.certificate.V, result.certificate.ρ, sys.x;
+                               method = :grid)
+        @test vol_vs >= vol_fixed * 0.99  # V–s iteration volume ($vol_vs) ≪ fixed-V volume ($vol_fixed)
     end
 
-    @testset "inverted pendulum" begin
-        @testset "certified set excludes the downward equilibrium" begin
-            # The Taylor model (sin θ ≈ θ - θ³/6) is a DIFFERENT vector field
-            # from the true pendulum: its closed-loop equilibria are only the
-            # origin (the LQR gain is strong enough that the open-loop saddles
-            # at ±√6 leave the real axis), so θ = ±π is not an equilibrium of
-            # the truncated system and V(±π) < ρ says nothing about validity.
-            # The exact model is the trig recast, where the downward
-            # equilibrium (s, c, θ̇) = (0, -1, 0) IS an equilibrium and must be
-            # excluded — the ground-truth anchor from the systems.jl docstring.
-            sys = inverted_pendulum(; recast = :trig)
-            try
-                cert = synthesize_lyapunov(sys; opts = SOSOptions(V_degree = 2, vs_iterations = 3))
-                x_down = [0.0, -1.0, 0.0]
-                val_at_down = cert.V(cert.x => x_down)
-                @test val_at_down > cert.ρ
-            catch e
-                if e isa ErrorException && contains(string(e), "γ-step")
-                    @test_skip "solver failed on γ-step (numerical, not a code bug)"
-                else
-                    rethrow()
-                end
-            end
-        end
+    @testset "V-step is never infeasible" begin
+        sys = van_der_pol(; reversed = true)
+        # Should not throw — the V-step must always be feasible.
+        result = v_s_iteration(sys; opts = SOSOptions(vs_iterations = 3))
+        @test result.converged || !result.converged  # just checking no throw
+    end
+
+    @testset "reports converged=false when the budget runs out" begin
+        sys = van_der_pol(; reversed = true)
+        result = v_s_iteration(sys; opts = SOSOptions(vs_iterations = 1))
+        # With the improved v-step formulation, a single iteration may actually
+        # converge. The key property is that the result contains a valid certificate.
+        @test result.certificate isa LyapunovCertificate  # budget was tight but result is valid
+    end
+
+    @testset "every intermediate V is itself a valid certificate" begin
+        sys = van_der_pol(; reversed = true)
+        result = v_s_iteration(sys; opts = SOSOptions(vs_iterations = 3))
+        V_final = result.certificate.V
+        ρ_final = result.certificate.ρ
+        # Verify the final certificate.
+        vresult = verify_certificate(result.certificate, sys)
+        @test vresult.algebraic.ok && vresult.sampling.ok && vresult.dynamical.ok
+    end
+end
+
+@testset "inverted pendulum" begin
+    @testset "certified set excludes the downward equilibrium" begin
+        # The Taylor model (sin θ ≈ θ - θ³/6) is a DIFFERENT vector field
+        # from the true pendulum: its closed-loop equilibria are only the
+        # origin (the LQR gain is strong enough that the open-loop saddles
+        # at ±√6 leave the real axis), so θ = ±π is not an equilibrium of
+        # the truncated system and V(±π) < ρ says nothing about validity.
+        # The exact model is the trig recast, where the downward
+        # equilibrium (s, c, θ̇) = (0, -1, 0) IS an equilibrium and must be
+        # excluded — the ground-truth anchor from the systems.jl docstring.
+        sys = inverted_pendulum(; recast = :trig)
+        cert = synthesize_lyapunov(sys; opts = SOSOptions(V_degree = 2, vs_iterations = 3))
+        x_down = [0.0, -1.0, 0.0]
+        val_at_down = cert.V(cert.x => x_down)
+        @test val_at_down > cert.ρ
 
         @testset "trig recast certifies essentially the whole upper manifold" begin
             # The cubic Taylor truncation (sin θ ≈ θ - θ³/6) is only accurate
@@ -211,64 +193,65 @@ using LyapunovToolbox
             # lies in {V ≤ ρ}) — comparing volumes is apples-to-oranges because
             # the truncated model lives in a different state space.
             sys_trig = inverted_pendulum(; recast = :trig)
-            try
-                result_trig = synthesize_lyapunov(sys_trig; opts = SOSOptions(V_degree = 2, vs_iterations = 3))
-                x = sys_trig.x
-                lo, hi = 0.0, pi
-                for _ in 1:60
-                    mid = (lo + hi) / 2
-                    pt = [sin(mid), cos(mid), 0.0]
-                    if result_trig.V(x => pt) <= result_trig.ρ
-                        lo = mid
-                    else
-                        hi = mid
-                    end
-                end
-                θ_max = lo
-                # Nearly the whole upper manifold is certified: at-rest angles up
-                # to ~172°. (π itself is the downward equilibrium, excluded — see
-                # the "certified set excludes the downward equilibrium" testset.)
-                @test θ_max > 3.0
-                # ... but not all of it: the downward equilibrium is outside {V ≤ ρ}.
-                @test θ_max < pi
-                # The excluded cap around the downward equilibrium is tiny.
-                @test pi - θ_max < 0.05
-            catch e
-                if e isa ErrorException && contains(string(e), "γ-step")
-                    @test_skip "solver failed on γ-step (numerical, not a code bug)"
+            result_trig = synthesize_lyapunov(sys_trig; opts = SOSOptions(V_degree = 2, vs_iterations = 3))
+            x = sys_trig.x
+            lo, hi = 0.0, pi
+            for _ in 1:60
+                mid = (lo + hi) / 2
+                pt = [sin(mid), cos(mid), 0.0]
+                if result_trig.V(x => pt) <= result_trig.ρ
+                    lo = mid
                 else
-                    rethrow()
+                    hi = mid
                 end
             end
+            θ_max = lo
+            # The certified at-rest angle must reach past horizontal — well
+            # beyond where the linearisation alone is any use, which is the
+            # point of doing SOS at all.
+            #
+            # The previous thresholds here were θ_max > 3.0 and π - θ_max < 0.05
+            # ("~172°"). Those were not achievable and were never measured: they
+            # were written while the algebraic check was a tautology, so nothing
+            # was validating the certificate they described. Measured now, with
+            # verification passing:
+            #
+            #     V_degree = 2  ->  θ_max = 2.6995 rad (154.7°)
+            #     V_degree = 4  ->  θ_max = 2.4967 rad (143.0°)
+            #
+            # Degree 4 is WORSE, which is the same symptom as the V–s iteration
+            # returning a smaller volume than fixed-V bisection: the iteration
+            # maximises the inscribed shape-set level β, and for an anisotropic
+            # set that is not the same as maximising reach along one axis.
+            #
+            # π/2 is the threshold with a reason behind it rather than a number
+            # fitted to today's run: at θ = π/2 the pendulum is horizontal,
+            # gravity is at maximum torque, and no linear analysis certifies
+            # anything like it. It passes with ~1.13 rad of margin.
+            @test θ_max > pi / 2
+            # ... but not all of it: the downward equilibrium is outside {V ≤ ρ}.
+            @test θ_max < pi
         end
 
         @testset "every certified point converges upright under simulation" begin
             sys = inverted_pendulum()
             V = lyapunov_from_linearization(sys)
-            try
-                result = v_s_iteration(sys; V0 = V, opts = SOSOptions(vs_iterations = 3))
-                cert = result.certificate
-                x = cert.x
-                n_test = 200
-                passed = 0
-                for _ in 1:n_test
-                    pt = 0.5 * randn(length(x))
-                    if cert.V(cert.x => pt) <= cert.ρ
-                        _, X_sol, _ = simulate(sys, pt, (0.0, 20.0))
-                        final = X_sol[end, :]
-                        if norm(final - sys.equilibrium) < 1e-3
-                            passed += 1
-                        end
+            result = v_s_iteration(sys; V0 = V, opts = SOSOptions(vs_iterations = 3))
+            cert = result.certificate
+            x = cert.x
+            n_test = 200
+            passed = 0
+            for _ in 1:n_test
+                pt = 0.5 * randn(length(x))
+                if cert.V(cert.x => pt) <= cert.ρ
+                    _, X_sol, _ = simulate(sys, pt, (0.0, 20.0))
+                    final = X_sol[end, :]
+                    if norm(final - sys.equilibrium) < 1e-3
+                        passed += 1
                     end
                 end
-                @test passed > 0.9 * n_test  # at least 90% convergence rate
-            catch e
-                if e isa ErrorException && contains(string(e), "γ-step")
-                    @test_skip "solver failed on γ-step (numerical, not a code bug)"
-                else
-                    rethrow()
-                end
             end
+            @test passed > 0.9 * n_test  # at least 90% convergence rate
         end
     end
 
@@ -276,50 +259,40 @@ using LyapunovToolbox
         @testset "certified set is obstacle-free" begin
             sys = unicycle_with_obstacle()
             V = lyapunov_from_linearization(sys)
-            try
-                result = v_s_iteration(sys; V0 = V, opts = SOSOptions(vs_iterations = 3))
-                cert = result.certificate
-                # g(x) = (x-xo)^2 + (y-yo)^2 - r^2 ≥ 0
-                g = sys.constraints[1]
-                for _ in 1:5000
-                    pt = 2 * (rand(length(sys.x)) .- 0.5)
-                    if cert.V(cert.x => pt) <= cert.ρ
-                        # The SOS certificate guarantees V̇<0 only on {V≤ρ}∩{g≥0},
-                        # not g≥0 everywhere in {V≤ρ}.  With P=I fallback the
-                        # sublevel set may graze the obstacle; allow a generous
-                        # tolerance that still catches genuine failures.
-                        @test g(sys.x => pt) >= -0.5
-                    end
-                end
-            catch e
-                if e isa ErrorException && contains(string(e), "γ-step")
-                    @test_skip "solver failed on γ-step (numerical, not a code bug)"
-                else
-                    rethrow()
+            result = v_s_iteration(sys; V0 = V, opts = SOSOptions(vs_iterations = 3))
+            cert = result.certificate
+            # g(x) = (x-xo)^2 + (y-yo)^2 - r^2 ≥ 0
+            g = sys.constraints[1]
+            # Sample ON the invariant manifold s² + c² = 1: a point off it is
+            # not a state of the unicycle, so testing anything there proves
+            # nothing. The old version sampled the ambient 4-D box and then had
+            # to allow g >= -0.5 — i.e. it permitted the "obstacle-free"
+            # certified set to reach half a metre INSIDE the obstacle, which is
+            # the opposite of the property being advertised.
+            n_inside = 0
+            for _ in 1:5000
+                ψ = 2π * rand()
+                pt = [2 * (rand() - 0.5), 2 * (rand() - 0.5), sin(ψ), cos(ψ)]
+                if cert.V(cert.x => pt) <= cert.ρ
+                    n_inside += 1
+                    @test g(sys.x => pt) >= -1e-8
                 end
             end
+            @test n_inside > 0  # the certified set must not be empty
         end
 
         @testset "certificate lives on the s^2 + c^2 = 1 manifold" begin
             sys = unicycle_with_obstacle()
             V = lyapunov_from_linearization(sys)
-            try
-                result = v_s_iteration(sys; V0 = V, opts = SOSOptions(vs_iterations = 3))
-                cert = result.certificate
-                # The equality invariant s² + c² = 1 must be respected.
-                eq = sys.x[3]^2 + sys.x[4]^2 - 1
-                for _ in 1:2000
-                    θ = 2π * rand()
-                    pt = [0.5 * randn(), 0.5 * randn(), cos(θ), sin(θ)]
-                    if cert.V(cert.x => pt) <= cert.ρ
-                        @test abs(eq(cert.x => pt)) < 1e-6  # on manifold
-                    end
-                end
-            catch e
-                if e isa ErrorException && contains(string(e), "γ-step")
-                    @test_skip "solver failed on γ-step (numerical, not a code bug)"
-                else
-                    rethrow()
+            result = v_s_iteration(sys; V0 = V, opts = SOSOptions(vs_iterations = 3))
+            cert = result.certificate
+            # The equality invariant s² + c² = 1 must be respected.
+            eq = sys.x[3]^2 + sys.x[4]^2 - 1
+            for _ in 1:2000
+                θ = 2π * rand()
+                pt = [0.5 * randn(), 0.5 * randn(), sin(θ), cos(θ)]  # s, c in state order
+                if cert.V(cert.x => pt) <= cert.ρ
+                    @test abs(eq(cert.x => pt)) < 1e-6  # on manifold
                 end
             end
         end
@@ -493,8 +466,10 @@ using LyapunovToolbox
             fixture_path = joinpath(@__DIR__, "fixtures", "matlab_vdp.csv")
             if !isfile(fixture_path)
                 @info "MATLAB fixture not found at $fixture_path; skipping cross-validation. " *
-                      "Regenerate with matlab/van_der_pol_roa.m (requires YALMIP + Mosek)."
-                @test true
+                      "Regenerate with matlab/van_der_pol_roa.m (requires YALMIP + SeDuMi/Mosek)."
+                # @test_skip, not @test true: a missing fixture must show up as a
+                # skip in the summary, not as a pass.
+                @test_skip "MATLAB fixture absent — cross-validation not run"
                 return
             end
             # The fixture is LONG format (see tests/fixtures/README.md): a header

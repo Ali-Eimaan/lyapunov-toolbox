@@ -49,13 +49,13 @@ slower and produces stack traces nobody can read.
 
 from __future__ import annotations
 
+import re
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Literal
 
 import numpy as np
-import re
 from numpy.typing import NDArray
 
 Array = NDArray[np.float64]
@@ -207,7 +207,15 @@ class RoaCertificate:
         for i, theta in enumerate(angles):
             d = np.array([np.cos(theta), np.sin(theta)])
 
-            def ray_point(r: float) -> NDArray[np.float64]:
+            # `d` and `fixed` are bound as defaults rather than captured: a
+            # closure over a loop variable is re-evaluated at call time, so if
+            # this function ever outlives the iteration it would silently use
+            # the last ray's direction (ruff B023).
+            def ray_point(
+                r: float,
+                d: NDArray[np.float64] = d,
+                fixed: dict[int, float] = fixed,
+            ) -> NDArray[np.float64]:
                 pt = np.zeros(self.n_vars)
                 pt[list(axes)] = r * d
                 for k, v in fixed.items():
@@ -358,7 +366,14 @@ class JuliaSession:
         # activating at runtime avoids leaking state into the process environ.
         from juliacall import Main as jl_main
 
-        jl_main.seval(f'using Pkg; Pkg.activate("{self._project}")')
+        # Pass the path as a VALUE, never interpolated into Julia source. On
+        # Windows the path contains backslashes, and `Pkg.activate("C:\Users\...")`
+        # is a Julia parse error: `\U` starts a unicode escape. That made the
+        # bridge unstartable on Windows while working fine on Linux CI, and
+        # julia_available() swallowed the exception so every integration test
+        # skipped instead of failing.
+        jl_main.seval("using Pkg")
+        jl_main.Pkg.activate(str(self._project))
         return juliacall
 
     def _start_pyjulia(self) -> Any:
@@ -373,7 +388,9 @@ class JuliaSession:
         try:
             jl = julia.Julia(compiled_modules=False)
             from julia import Main as _main
-            _main.eval(f'using Pkg; Pkg.activate("{self._project}")')
+            # Path as a value, not interpolated source — see _start_juliacall.
+            _main.eval("using Pkg")
+            _main.Pkg.activate(str(self._project))
             return jl
         except Exception as exc:
             raise JuliaBackendError(

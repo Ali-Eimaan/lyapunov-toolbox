@@ -137,6 +137,17 @@ function bisect_level_set(sys::PolynomialSystem, V; opts::SOSOptions = SOSOption
         solve_time_acc += witness.solve_time
         @assert feasible_final "bisect_level_set: best ρ = $best is not feasible on re-verification"
     end
+    # ρ = 0 is not a certificate: {V ≤ 0} is either empty or the single point
+    # x_eq, and it propagates as V/ρ = Inf into the ρ≡1 renormalisation of
+    # v_s_iteration. It means no positive level was certifiable — almost always
+    # because the linearisation is not exponentially stable at the equilibrium,
+    # so no strict margin ε‖x-x_eq‖^{2k} can be met near it. Say that, rather
+    # than handing back a number that looks like an answer.
+    best > 0 || throw(ErrorException(
+        "bisect_level_set: no positive ρ is certifiable for this V (best = $best). " *
+        "{V ≤ 0} is empty or a single point, so this is not a certificate. The " *
+        "usual cause is a non-hyperbolic linearisation at the equilibrium — check " *
+        "that the closed loop is exponentially stable there, or supply a better V0."))
     return best, witness, n_sdps, solve_time_acc
 end
 
@@ -151,9 +162,16 @@ the baseline that the V–s iteration has to beat. If `v_s_iteration` does not
 improve on `estimate_roa`, something is wrong with the V-step — that comparison
 is the main diagnostic in the whole package.
 """
-function estimate_roa(sys::PolynomialSystem, V; opts::SOSOptions = SOSOptions())
+function estimate_roa(sys::PolynomialSystem, V; opts::SOSOptions = SOSOptions(),
+                      ρ_hi = nothing)
+    # ρ_hi is threaded through for GLOBALLY STABLE systems, where the bisection
+    # has no finite boundary to find and would otherwise (correctly) throw after
+    # 30 doublings. The consensus network with κ > 0 is the example: its
+    # disagreement dynamics really are globally stable, so the honest thing is
+    # for the caller to state the region of interest rather than for the library
+    # to invent one.
     ρ, witness, n_sdps, solve_time = bisect_level_set(sys, V; opts = opts,
-                                                       ρ_lo = 0.0, ρ_hi = nothing)
+                                                       ρ_lo = 0.0, ρ_hi = ρ_hi)
     # Check boundedness.
     bounded, evidence = is_sublevel_set_bounded(V, ρ, sys.x;
                                                 solver = opts.solver, ε = opts.ε)
@@ -215,7 +233,7 @@ docstring, in the notebooks, and in the README — a claim of "the largest ROA" 
 false and a reviewer will know it.
 """
 function v_s_iteration(sys::PolynomialSystem; opts::SOSOptions = SOSOptions(),
-                       V0 = nothing, shape = nothing)
+                       V0 = nothing, shape = nothing, ρ_hi = nothing)
     x = sys.x
     # Seed V from linearisation.
     if V0 === nothing
@@ -235,7 +253,7 @@ function v_s_iteration(sys::PolynomialSystem; opts::SOSOptions = SOSOptions(),
     total_sdps = 0
 
     # Initial certification (fixed-V bisection).
-    cert0 = estimate_roa(sys, V; opts = opts)
+    cert0 = estimate_roa(sys, V; opts = opts, ρ_hi = ρ_hi)
     ρ0 = cert0.ρ
     push!(ρ_history, ρ0)
     # β0: computed on the normalised V/ρ0 so that it is directly comparable to
@@ -250,13 +268,37 @@ function v_s_iteration(sys::PolynomialSystem; opts::SOSOptions = SOSOptions(),
     β_old = β0
     V_current = V
     ρ_current = ρ0
+    # The positivity margin travels with V under the ρ≡1 normalisation; see the
+    # γ-step below. After the first iteration ρ_current is 1, so this stops
+    # changing — but the value it settles at is ε/ρ₀, not ε, and the certificate
+    # records it.
+    ε_current = opts.ε
     converged = false
+    best_vol = vol0          # volume of the fixed-V baseline; the iteration
+                             # must never return something worse than this
+    # Set when a marginal V-step solve fails to verify: the refinement stopped
+    # early but the certificate we hold is still a verified one.
+    refinement_stalled = false
     best_cert = cert0
 
     for iter in 1:opts.vs_iterations
         # γ-step: get multiplier λ at ρ ≡ 1 (after V is normalised).
+        #
+        # The margin must be rescaled with V. The certified program at (V, ρ) is
+        #     -(V̇ + ε·m) + λ(V - ρ) ⪰ 0.
+        # The SOS cone is a cone, so dividing the whole inequality by ρ gives an
+        # EQUIVALENT program:
+        #     -(V̇/ρ + (ε/ρ)·m) + λ(V/ρ - 1) ⪰ 0,
+        # i.e. at Ṽ = V/ρ the equivalent margin is ε/ρ, not ε. `m` does not scale
+        # with V, so reusing ε here silently poses a strictly harder problem
+        # whenever ρ > 1 — and it was turning the γ-step INFEASIBLE at iteration
+        # 1, which the iteration's own invariant says is impossible. (Observed on
+        # the Taylor pendulum, ρ₀ = 15.46: infeasible at ε, feasible at ε/ρ₀.
+        # Van der Pol survived only because its ρ₀ ≈ 2.3 is small.)
+        ε_current /= ρ_current
+        opts_scaled = _with_epsilon(opts, ε_current)
         V_scaled = V_current / ρ_current
-        feasible_γ, w_γ = multiplier_step(sys, V_scaled, 1.0; opts = opts)
+        feasible_γ, w_γ = multiplier_step(sys, V_scaled, 1.0; opts = opts_scaled)
         total_sdps += 1
         total_time += w_γ.solve_time
         if !feasible_γ
@@ -278,17 +320,49 @@ function v_s_iteration(sys::PolynomialSystem; opts::SOSOptions = SOSOptions(),
                 "renormalised or λ was not held fixed."))
         end
 
-        # V-step: maximise β over V with λ fixed.
+        # V-step: maximise β over V with λ fixed. It must use the SAME margin as
+        # the γ-step just did: substituting V = V_scaled into the V-step
+        # constraints reproduces the γ-step program exactly, which is the reason
+        # the previous iterate is guaranteed feasible here. Using a different ε
+        # breaks that guarantee and the "V-step infeasible" throw fires on a
+        # problem that is in fact feasible.
         λ = w_γ.multipliers[:λ]
-        feasible_v, V_new, w_v = v_step(sys, λ, shape, β_new; opts = opts)
+        # Carry the γ-step's containment multipliers into the V-step: they must
+        # be fixed there (see v_step) or the containment constraint is bilinear.
+        σc_γ = get(w_γ.multipliers, :σc, Any[])
+        feasible_v, V_new, w_v = v_step(sys, λ, shape, β_new;
+                                        opts = opts_scaled, σc_fixed = σc_γ)
         total_sdps += 1
         total_time += w_v.solve_time
         if !feasible_v
-            throw(ErrorException(
-                "v_s_iteration: V-step (v_step) infeasible at iteration $iter " *
-                "with solver status $(w_v.status); the V-step is feasible whenever " *
-                "the previous iterate is, so an infeasible V-step means the SDP " *
-                "failed to solve."))
+            # An INFEASIBLE V-step is still a bug: the previous iterate is
+            # feasible for this program by construction, so the search space
+            # cannot be empty. Throw, as before.
+            if w_v.status == "INFEASIBLE" || w_v.status == "DUAL_INFEASIBLE" ||
+               w_v.status == "INFEASIBLE_OR_UNBOUNDED"
+                throw(ErrorException(
+                    "v_s_iteration: V-step (v_step) reported $(w_v.status) at " *
+                    "iteration $iter. The previous iterate is feasible for this " *
+                    "program, so an empty search space is a formulation bug — " *
+                    "check the V basis (it must admit the previous V, including " *
+                    "constant and linear terms when x_eq ≠ 0) and the margin scaling."))
+            end
+            # A MARGINAL solve (ALMOST_OPTIMAL / SLOW_PROGRESS) that fails the
+            # Gram check is different: the program is feasible, the solver just
+            # could not produce a Gram matrix that verifies. That is the
+            # refinement failing to improve, not the iteration being broken.
+            #
+            # Keep the last VERIFIED certificate and stop. Returning a verified
+            # (if unrefined) certificate with converged = false is strictly more
+            # useful than throwing away a valid result — and far better than
+            # relaxing the eigenvalue gate, which would return a Gram matrix that
+            # is not positive semidefinite, i.e. not a certificate at all.
+            refinement_stalled = true
+            opts.verbose && @warn(
+                "v_s_iteration: V-step did not verify at iteration $iter " *
+                "(status $(w_v.status)); keeping the last verified certificate. " *
+                "Run with verbose = true on v_step to see the Gram residuals.")
+            break
         end
 
         # Renormalise: ρ ≡ 1, so new V is V_new with ρ = 1.
@@ -325,18 +399,39 @@ function v_s_iteration(sys::PolynomialSystem; opts::SOSOptions = SOSOptions(),
         if haskey(w_γ.grams, :λ)
             all_grams[:λ] = w_γ.grams[:λ]
         end
-        # :shape_containment Gram belongs to the V-step (uses V_new).
-        # Already in w_v.grams from v_step.
+        # Drop :shape_containment. The ROA claim rests on exactly two SOS
+        # statements — V - ε·m ⪰ 0 (:positivity) and
+        # -(V̇ + ε·m) + λ(V - ρ) ⪰ 0 (:derivative) — plus the multipliers' own
+        # certificates. `{p ≤ β} ⊆ {V ≤ 1}` is the V-step's search OBJECTIVE, not
+        # part of the proof: β is what the iteration maximises, and the
+        # certificate is just as valid at a smaller β.
+        #
+        # Keeping it here made the certificate carry a witness whose target
+        # cannot be reconstructed (β and the shape set are not fields), so
+        # verify_certificate had to either skip it — which is how the whole
+        # algebraic check ended up exempted — or fail every certificate. Storing
+        # only what constitutes the proof removes the dilemma. v_step still
+        # returns it in its own witness for diagnostics.
+        delete!(all_grams, :shape_containment)
 
         cert = LyapunovCertificate(
             V_current, ρ_current, x,
             multipliers, all_grams,
-            opts.ε, k, sys.name,
+            ε_current, k, sys.name,
             w_v.status, w_v.solve_time + w_γ.solve_time,
             gram_dimension(length(x), k),
             bounded, evidence,
         )
-        best_cert = cert
+        # Keep the BEST iterate, not the last. The V-step maximises the
+        # inscribed shape-set level β, which for an anisotropic sublevel set is
+        # not the same as maximising volume — so a later iterate can genuinely
+        # enclose less than an earlier one, and returning the last would make
+        # v_s_iteration report a smaller set than plain estimate_roa. A
+        # heuristic should hand back its best result, not its most recent one.
+        if vol > best_vol
+            best_vol = vol
+            best_cert = cert
+        end
 
         # Convergence check.
         if β_new - β_old <= opts.vs_improvement_tol * max(1.0, β_old)
@@ -352,6 +447,35 @@ function v_s_iteration(sys::PolynomialSystem; opts::SOSOptions = SOSOptions(),
         total_time, total_sdps, opts,
     )
     return result
+end
+
+"""
+    _with_epsilon(opts, ε)
+
+A copy of `opts` with the positivity margin replaced.
+
+Used by [`v_s_iteration`](@ref) to keep the margin consistent with the ρ≡1
+renormalisation of `V`: the SOS cone is a cone, so scaling `V` by `1/ρ` scales
+the equivalent margin by `1/ρ` too. `SOSOptions` is immutable, so this returns a
+new instance rather than mutating the caller's options — `verify_sublevel_set`
+documents that it never mutates `opts`, and the benchmark row records the
+configuration it was given.
+"""
+function _with_epsilon(opts::SOSOptions, ε::Real)
+    return SOSOptions(
+        solver = opts.solver,
+        ε = Float64(ε),
+        V_degree = opts.V_degree,
+        multiplier_degree = opts.multiplier_degree,
+        constraint_multiplier_degree = opts.constraint_multiplier_degree,
+        bisection_tol = opts.bisection_tol,
+        max_bisection_iters = opts.max_bisection_iters,
+        vs_iterations = opts.vs_iterations,
+        vs_improvement_tol = opts.vs_improvement_tol,
+        verbose = opts.verbose,
+        solver_silent = opts.solver_silent,
+        feasibility_tol = opts.feasibility_tol,
+    )
 end
 
 """

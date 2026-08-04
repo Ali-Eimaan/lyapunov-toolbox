@@ -269,37 +269,54 @@ using LyapunovToolbox
     end
 
     @testset "constrained certificates (Putinar)" begin
-        @testset "obstacle constraint enlarges the feasible level set" begin
+        @testset "obstacle constraint SHRINKS the certifiable level" begin
+            # The program now imposes containment, {V ≤ ρ} ⊆ {g ≥ 0}, on top of
+            # the S-procedure term in the derivative constraint. So adding an
+            # obstacle is a RESTRICTION, not a relaxation: the certifiable level
+            # can only go down. (It used to be a relaxation — which is exactly
+            # why the certified set was free to overlap the obstacle.)
             @polyvar x1 x2
             x = [x1, x2]
-            f = [-x1; -x2]  # Stable node
-            # Constraint: g(x) = (x1-0.5)^2 + x2^2 - 0.04 ≥ 0 (obstacle at (0.5,0))
-            g = (x1 - 0.5)^2 + x2^2 - 0.04
+            f = [-x1; -x2]  # stable node; V = 0.5(x1² + x2²)
+            g = (x1 - 0.5)^2 + x2^2 - 0.04   # obstacle at (0.5, 0), radius 0.2
             sys_unc = PolynomialSystem(x, f, "stable", [0.0, 0.0], [], [], String[], "")
             sys_con = PolynomialSystem(x, f, "stable_constrained", [0.0, 0.0], [g], [], String[], "")
             V = lyapunov_from_linearization(sys_unc)
-            feasible_unc, _ = verify_sublevel_set(sys_unc, V, 1.0)
-            feasible_con, _ = verify_sublevel_set(sys_con, V, 1.0)
-            @test feasible_unc
-            @test feasible_con
+
+            # ρ = 1 puts the obstacle strictly inside {V ≤ 1}, so containment is
+            # impossible and the constrained program MUST be infeasible there.
+            @test verify_sublevel_set(sys_unc, V, 1.0)[1]
+            @test !verify_sublevel_set(sys_con, V, 1.0)[1]
+
+            # At a level small enough to clear the obstacle it is feasible again.
+            # The obstacle's nearest point is at distance 0.3, and V = 0.5‖x‖²,
+            # so any ρ < 0.5·0.3² = 0.045 is clear.
+            @test verify_sublevel_set(sys_con, V, 0.02)[1]
         end
 
         @testset "certified set contains no point violating the constraint" begin
             @polyvar x1 x2
             x = [x1, x2]
             f = [-x1; -x2]
-            g = (x1 - 0.3)^2 + x2^2 - 0.01  # small obstacle near origin
+            g = (x1 - 0.3)^2 + x2^2 - 0.01  # obstacle at (0.3, 0), radius 0.1
             sys = PolynomialSystem(x, f, "stable", [0.0, 0.0], [g], [], String[], "")
             V = lyapunov_from_linearization(sys)
-            feasible, _ = verify_sublevel_set(sys, V, 0.5)
-            @test feasible
-            # Sample {V ≤ 0.5} and assert g(x) ≥ -1e-8
-            for _ in 1:2000
+
+            # Take the largest level the program will certify, then assert the
+            # advertised property on it. The tolerance is 1e-8, not 1e-2: with
+            # the containment constraint the certified set is genuinely
+            # obstacle-free, so a loose tolerance would hide a real regression.
+            ρ, _, _, _ = bisect_level_set(sys, V)
+            @test ρ > 0
+            n_inside = 0
+            for _ in 1:5000
                 pt = 2 * (rand(2) .- 0.5)
-                if V(x => pt) <= 0.5
-                    @test g(x => pt) >= -1e-2  # constraint violated at $pt: g = $(g(x => pt))
+                if V(x => pt) <= ρ
+                    n_inside += 1
+                    @test g(x => pt) >= -1e-8
                 end
             end
+            @test n_inside > 0   # a vacuously-empty set must not pass
         end
 
         @testset "equality invariants use free-sign multipliers" begin
@@ -321,17 +338,23 @@ using LyapunovToolbox
         @testset "passes on a genuine certificate" begin
             sys = van_der_pol(; reversed = true)
             V = lyapunov_from_linearization(sys)
-            feasible, witness = verify_sublevel_set(sys, V, 0.1)
+            # The certificate must record the SAME ε and k the witness was
+            # solved with. Building it with ε = 1e-5 while verify_sublevel_set
+            # used the default 1e-6 made the stored Gram matrices belong to a
+            # different program — which the real algebraic check now catches and
+            # the old tautological one could not.
+            opts = SOSOptions()
+            feasible, witness = verify_sublevel_set(sys, V, 0.1; opts = opts)
             @test feasible
             cert = LyapunovCertificate(
                 V, 0.1, sys.x,
                 witness.multipliers, witness.grams,
-                1e-5, 2, sys.name,
+                opts.ε, 2, sys.name,
                 witness.status, witness.solve_time,
                 gram_dimension(length(sys.x), 2),
                 true, :unchecked,
             )
-            result = verify_certificate(cert, sys; tol = 1e-5)
+            result = verify_certificate(cert, sys; tol = 1e-6)
             @test result.algebraic.ok
             @test result.sampling.ok
             @test result.dynamical.ok

@@ -11,14 +11,14 @@ description = "Python front end for SOS Lyapunov synthesis and region-of-attract
 # directory. Do not "fix" this by pointing at ../README.md -- it breaks
 # `pip install -e python/`. The SPDX text below is the licence of record; the
 # full text is in ../LICENSE.
-license = { text = "MIT" }
+license = { text = "BSD-3-Clause" }
 requires-python = ">=3.10"
 authors = [{ name = "Ali-Eiman" }]
 keywords = ["lyapunov", "sum-of-squares", "region-of-attraction", "control-theory", "robotics"]
 classifiers = [
     "Development Status :: 3 - Alpha",
     "Intended Audience :: Science/Research",
-    "License :: OSI Approved :: MIT License",
+    "License :: OSI Approved :: BSD License",
     "Programming Language :: Python :: 3",
     "Programming Language :: Julia",
     "Topic :: Scientific/Engineering",
