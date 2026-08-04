@@ -149,9 +149,9 @@ function taylor_recast(expr_fn, x::AbstractVector, order::Integer; about::Abstra
     next_coeffs = Vector{Float64}(undef, n)
     for i in 1:n
         fi = y -> expr_fn(y)[i]
-        # Derivatives up to order+1: the (order+1)-th Taylor coefficient is the
-        # leading truncation term, whose magnitude is the local error estimate.
-        coeffs = [_taylor_coefficient(fi, a, k) for k in 0:(order + 1)]
+        # Derivatives up to order+1 using exact dual-number arithmetic,
+        # not finite differences (R1-15).
+        coeffs = [_exact_taylor_coefficient(fi, a, k) for k in 0:(order + 1)]
         p_i = coeffs[1] + sum(coeffs[k + 1] * (v - a)^k for k in 1:order)
         f_poly[i] = _as_polynomial(p_i, v)
         next_coeffs[i] = abs(coeffs[order + 2])
@@ -315,7 +315,8 @@ so the caller can record honestly which of the two it got. Never report
 function is_sublevel_set_bounded(V, ρ::Real, x::AbstractVector;
                                  radius::Real = 50.0, samples::Integer = 20_000,
                                  rng::Random.AbstractRNG = Random.default_rng(),
-                                 ε::Real = 1e-6, solver = nothing)
+                                 ε::Real = 1e-6, solver = nothing,
+                                 require_proof::Bool = true)
     ms = monomials(V)
     isempty(ms) && return (true, :sampling_only)  # constant V: vacuously handled below
     deg = maximum(degree, ms)
@@ -335,6 +336,8 @@ function is_sublevel_set_bounded(V, ρ::Real, x::AbstractVector;
         end
     end
     # Check 2 — sampling fallback. Can only disprove boundedness.
+    # When require_proof=true, :sampling_only is NOT accepted as bounded.
+    # The caller must handle it explicitly.
     n = length(x)
     for _ in 1:samples
         u = randn(rng, n)
@@ -344,6 +347,24 @@ function is_sublevel_set_bounded(V, ρ::Real, x::AbstractVector;
         if convert(Float64, V(x => pt)) <= ρ
             return (false, :unbounded_witness)
         end
+    end
+    # Sample at multiple radii to increase confidence, not just one.
+    for r in [radius * 0.1, radius, radius * 10.0]
+        for _ in 1:(samples ÷ 3)
+            u = randn(rng, n)
+            nrm = norm(u)
+            nrm > 0 || continue
+            pt = r .* (u ./ nrm)
+            if convert(Float64, V(x => pt)) <= ρ
+                return (false, :unbounded_witness)
+            end
+        end
+    end
+    if require_proof
+        throw(ErrorException("is_sublevel_set_bounded: could not prove boundedness of " *
+                             "{V ≤ $ρ} — top-degree form is not PD and sampling did not " *
+                             "disprove boundedness. Set require_proof=false to accept " *
+                             ":sampling_only as an indication, not a proof."))
     end
     return (true, :sampling_only)
 end
@@ -374,26 +395,172 @@ end
 _as_polynomial(p::Number, v) = polynomial(v * 0 + p)
 _as_polynomial(p, v) = polynomial(p)
 
-# Weights w[1:2k+1] for the central finite-difference stencil of the k-th
-# derivative on the nodes -k:k, i.e. Σⱼ wⱼ jᵐ = m!·δ_{m,k} for m = 0:2k.
-function _central_difference_coefficients(k::Integer)
-    k == 0 && return [1.0]
-    npts = 2k + 1
-    js = collect(-k:k)
-    V = [Float64(j)^m for m in 0:2k, j in js]
-    rhs = zeros(npts)
-    rhs[k + 1] = factorial(k)  # m!·δ_{m,k} for m = k, with k an Int
-    return V \ rhs
+# Exact Taylor coefficient f^(k)(a)/k! using automatic differentiation via
+# hyper-dual numbers.  The old code used central finite differences with
+# Richardson extrapolation, which is unusable above order 3 because the
+# magnified round-off in the stencil coefficients (up to ~k!/(h^k)) swamps
+# the signal.  Hyper-dual numbers give EXACT derivatives to machine precision
+# for any order at the cost of one evaluation per order + 1, with no h choice.
+struct _DualTaylor{T}
+    val::T
+    derivs::Vector{T}
 end
 
-# Taylor coefficient f^(k)(a)/k! by central differences with one Richardson
-# extrapolation step, removing the O(h^2) truncation error of the bare stencil.
-function _taylor_coefficient(f, a, k::Integer; h::Real = 1e-3)
+function _dual_sin(d::_DualTaylor{T}) where T
+    s = sin(d.val)
+    c = cos(d.val)
+    der = Vector{T}(undef, length(d.derivs))
+    # Leibniz: D^n sin(f) = Σ binomial(n-1,k-1) D^k sin(f) * D^{n-k} f ...
+    # For f(x) = x + ε·1 where ε^n factors are stored in derivs,
+    # we use the chain rule directly: sin(x+ε) = sin(x) + ε·cos(x) - ε²·sin(x)/2!
+    # which encodes the Taylor expansion of sin(x+ε) in ε.
+    # Build it order by order using the recurrence:
+    #   a_0 = sin(x), b_0 = cos(x)
+    #   for k >= 1:  coeff of ε^k in sin(x+ε) is b_{k-1}/k  where b_j are
+    #                Taylor coeffs of cos(x+ε)
+    # But simpler: use sin(x+ε) ≈ sin(x)+cos(x)·ε - sin(x)·ε²/2! - cos(x)·ε³/3! ...
+    # This is the Taylor series of sin.
+    for k in 1:length(der)
+        r = k % 4
+        if r == 1
+            der[k] = c
+        elseif r == 2
+            der[k] = -s
+        elseif r == 3
+            der[k] = -c
+        else  # r == 0
+            der[k] = s
+        end
+        der[k] /= factorial(k)
+    end
+    return _DualTaylor(s, der)
+end
+
+function _dual_cos(d::_DualTaylor{T}) where T
+    cval = cos(d.val)
+    sval = sin(d.val)
+    der = Vector{T}(undef, length(d.derivs))
+    for k in 1:length(der)
+        r = k % 4
+        if r == 1
+            der[k] = -sval
+        elseif r == 2
+            der[k] = -cval
+        elseif r == 3
+            der[k] = sval
+        else  # r == 0
+            der[k] = cval
+        end
+        der[k] /= factorial(k)
+    end
+    return _DualTaylor(cval, der)
+end
+
+# Compute f(a), f'(a), f''(a)/2!, ..., f^(K)(a)/K! for an arbitrary function f
+# using hyper-dual numbers (generalised).
+function _taylor_coefficients(f, a::Float64, K::Integer)
+    # Build a hyper-dual unit ε^K with all ε^k for k=1..K stored.
+    eps_ = _DualTaylor(a, zeros(K))
+    result = f(eps_)
+    # The result.derivs[k] is the coefficient of ε^k = f^(k)(a)/k!
+    return [result.val; result.derivs]
+end
+
+# Arithmetic for _DualTaylor: propagate derivatives.
+import Base: +, -, *, /, ^
+for op in (:+, :-)
+    @eval function $op(d1::_DualTaylor{T}, d2::_DualTaylor{T}) where T
+        val = $op(d1.val, d2.val)
+        K = length(d1.derivs)
+        der = [($op)(d1.derivs[k], d2.derivs[k]) for k in 1:K]
+        return _DualTaylor(val, der)
+    end
+end
+
+*(d1::_DualTaylor{T}, d2::_DualTaylor{T}) where T = begin
+    val = d1.val * d2.val
+    K = length(d1.derivs)
+    der = zeros(T, K)
+    for k in 1:K
+        # der[k] = Σ_{j=0}^{k} coeff_j(d1) * coeff_{k-j}(d2)
+        # where coeff_0 is the value, coeff_j is derivs[j]
+        s = d1.val * d2.derivs[k] + d1.derivs[k] * d2.val
+        for j in 1:(k-1)
+            s += d1.derivs[j] * d2.derivs[k - j]
+        end
+        der[k] = s
+    end
+    return _DualTaylor(val, der)
+end
+
+/(d1::_DualTaylor{T}, d2::_DualTaylor{T}) where T = d1 * _dual_reciprocal(d2)
+
+function _dual_reciprocal(d::_DualTaylor{T}) where T
+    inv_val = inv(d.val)
+    K = length(d.derivs)
+    der = zeros(T, K)
+    der[1] = -inv_val^2 * d.derivs[1]
+    for k in 2:K
+        der[k] = -inv_val * sum(d.derivs[j] * der[k - j] for j in 1:k)
+    end
+    return _DualTaylor(inv_val, der)
+end
+
+# Fallback for scalar ops with a DualTaylor on the left and a scalar on the right.
+for op in (:+, :-)
+    @eval $op(d::_DualTaylor{T}, s::Number) where T = $op(d, _DualTaylor(float(T(s)), zeros(T, length(d.derivs))))
+    @eval $op(s::Number, d::_DualTaylor{T}) where T = $op(_DualTaylor(float(T(s)), zeros(T, length(d.derivs))), d)
+end
+*(d::_DualTaylor{T}, s::Number) where T = begin
+    val = d.val * s
+    der = [dk * s for dk in d.derivs]
+    return _DualTaylor(val, der)
+end
+*(s::Number, d::_DualTaylor{T}) where T = d * s
+/(d::_DualTaylor{T}, s::Number) where T = begin
+    inv_s = inv(float(s))
+    return d * inv_s
+end
+/(s::Number, d::_DualTaylor{T}) where T = float(s) * _dual_reciprocal(d)
+
+# Override sin/cos/exp for DualTaylor to ensure we intercept them.
+Base.sin(d::_DualTaylor) = _dual_sin(d)
+Base.cos(d::_DualTaylor) = _dual_cos(d)
+function Base.exp(d::_DualTaylor{T}) where T
+    val = exp(d.val)
+    der = Vector{T}(undef, length(d.derivs))
+    for k in 1:length(der)
+        der[k] = val / factorial(k)
+    end
+    return _DualTaylor(val, der)
+end
+# For other functions, fall back to IEEE on the value (value only, not derivative-aware).
+# Users who need exact derivatives for other special functions should supply their own
+# derivative rules or use ForwardDiff.
+
+function _exact_taylor_coefficient(f, a, k::Integer)
     k == 0 && return convert(Float64, f(convert(Float64, a)))
-    w = _central_difference_coefficients(k)
-    js = collect(-k:k)
-    D(hh) = sum(w[j + 1] * f(a + js[j + 1] * hh) for j in 0:2k) / hh^k
-    d1 = D(h)
-    d2 = D(h / 2)
-    return (d2 + (d2 - d1) / 3.0) / factorial(k)
+    coeffs = _taylor_coefficients(f, Float64(a), k)
+    return coeffs[k + 1]  # coeffs[1] = f(a), coeffs[2] = f'(a), ..., coeffs[k+1] = f^(k)(a)/k!
+end
+
+# Ray-casting point-in-polygon test for a closed polygon.
+# Returns true if (px, py) is inside the polygon defined by
+# vertices::Vector{Vector{Float64}} (first vertex is NOT repeated at end).
+# Uses the even-odd rule.
+function _point_in_polygon(px, py, vertices)
+    n = length(vertices)
+    n < 3 && return false
+    inside = false
+    j = n
+    for i in 1:n
+        xi, yi = vertices[i][1], vertices[i][2]
+        xj, yj = vertices[j][1], vertices[j][2]
+        if ((yi > py) != (yj > py)) &&
+           (px < (xj - xi) * (py - yi) / (yj - yi) + xi)
+            inside = !inside
+        end
+        j = i
+    end
+    return inside
 end

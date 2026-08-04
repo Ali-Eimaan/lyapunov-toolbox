@@ -1,17 +1,17 @@
-% sos_decomposition.tex — Parrilo's SOS decomposition, in this repository's
-% notation, with one fully worked example.
+% positivstellensatz.tex — Putinar's Positivstellensatz and its application
+% to region-of-attraction certification in this repository.
 %
-% Audience: an advisor skimming the GitHub profile who wants to know in ninety
-% seconds whether the author understands SOS or has only called a library. Write
-% for that reader. The worked example in Section 4 is what answers the question;
-% everything else is setup.
+% Focus: how the certificate pi(x) >= 0 on K translates to SOS constraints
+% with multipliers, and why this is compositional (multipliers carry their
+% own SOS certificates as Gram matrices, which is what makes the whole
+% construction verifiable in verify_certificate).
 %
-% Compile:  latexmk -pdf sos_decomposition.tex   (from docs/derivations/)
+% Compile:  latexmk -pdf positivstellensatz.tex   (from docs/derivations/)
 
 \documentclass[11pt]{article}
 \input{preamble}
 
-\title{Sum-of-Squares Decomposition and the Gram Matrix Parameterisation}
+\title{Putinar's Positivstellensatz and the Positivity Certificate}
 \author{Ali-Eiman}
 \date{}
 
@@ -19,235 +19,131 @@
 \maketitle
 
 \begin{abstract}
-Checking global nonnegativity of a multivariate polynomial is NP-hard;
-checking membership in the SOS cone is a semidefinite program --- tractability
-bought at the price of a sufficient-only condition (every SOS polynomial is
-nonnegative, but not conversely). This document derives the Gram matrix
-parameterisation that makes the reduction to SDP possible and works one
-example end to end, by hand, comparing the result against the output of
-\codelink{sos\_decomposition}{julia/src/sos\_lyapunov.jl}.
+\texttt{verify\_sublevel\_set} solves an SOS program that certifies $\dot{V} \le 0$
+on $\{V \le \rho\}$. The condition is \emph{sufficient}, not necessary —
+solvers may miss a certificate. Putinar's Positivstellensatz tells us when
+the search space is complete (no missed certificates), and every multiplier in
+the program carries its own SOS certificate, making the whole proof
+self-contained and machine-checkable.
 \end{abstract}
 
-\section{Setting}
-Let $\R[x] = \R[x_1,\dots,x_n]$ be the polynomial ring in $n$ variables.
-$\mathcal{P}_{n,2d} \subset \R[x]$ is the cone of polynomials of total degree
-at most $2d$ that are nonnegative on $\R^n$. The SOS cone
-$\Sigma_{n,2d} \subset \R[x]$ is
+\section{From Lyapunov to semialgebraic set}
+
+The Lyapunov condition
 \begin{equation}
-  \Sigma_{n,2d} = \Bigl\{\, p \in \R[x] : \deg p \le 2d,\;
-  p = \sum_{i=1}^k q_i^2 \quad \text{for some }q_i \in \R[x] \,\Bigr\}.
+  \dot{V}(x) \le -\varepsilon\|x - x_{\mathrm{eq}}\|^{2k}
+  \quad \text{on} \quad
+  \mathcal{K} = \{\, x \mid V(x) \le \rho \,\}
 \end{equation}
-Clearly $\Sigma_{n,2d} \subseteq \mathcal{P}_{n,2d}$. Hilbert (1888) proved
-that equality holds in exactly three cases:
+is a \emph{non-negativity constraint on a semialgebraic set}. $\mathcal{K}$
+is defined by the single polynomial inequality $p_1(x) := \rho - V(x) \ge 0$,
+and globally non-negative polynomials are the \emph{easiest} certificates
+(just SOS), but constrained non-negativity is harder.
+
+\section{The (generalised) S-procedure}
+
+Let $q(x) := -\dot{V}(x) - \varepsilon\|x - x_{\mathrm{eq}}\|^{2k}$. The
+classical S-procedure says: if there exists $\lambda \in \R_{\ge 0}$ such
+that $q(x) - \lambda(\rho - V(x))$ is SOS, then $q \ge 0$ on $\{V \le \rho\}$.
+
+The generalisation used in this toolbox lifts $\lambda$ to a \emph{polynomial}
+multiplier, and adds SOS multipliers $\sigma_j$ for semialgebraic constraints
+$g_j(x) \ge 0$ and free-sign polynomial multipliers $\mu_k$ for equality
+constraints $h_k(x) = 0$:
+\begin{equation}\label{eq:putinar}
+  q(x) + \lambda(x)(V(x) - \rho)
+  - \sum_{j} \sigma_j(x) g_j(x)
+  - \sum_{k} \mu_k(x) h_k(x)
+  \in \Sigma_{n,2d}.
+\end{equation}
+
+Each $\sigma_j$ is SOS (its own Gram matrix), $\lambda$ is SOS, and each
+$\mu_k$ is an unrestricted polynomial (linear in its monomial coefficients).
+The multipliers are \emph{unknowns} of the SDP, found by the solver.
+
+\section{Putinar's Positivstellensatz}
+
+The representation~\eqref{eq:putinar} is sufficient but not necessary.
+Putinar (1993) proved that under the \emph{Archimedean condition} —
+existence of a polynomial $N - \|x\|^2$ in the quadratic module generated
+by $\{g_j\}$ — every polynomial \emph{strictly} positive on $\mathcal{K}$
+admits such a representation. This means:
+
+\begin{itemize}
+  \item \textbf{If the Archimedean condition holds:} infeasibility of
+    the SDP means $q$ genuinely fails to be positive on $\mathcal{K}$
+    (no certificate exists at \emph{any} degree).
+  \item \textbf{If it does not hold:} infeasibility means no certificate
+    exists \emph{at this degree}, and the user may increase the degree
+    or add a redundant ball constraint.
+\end{itemize}
+
+The \texttt{unicycle\_with\_obstacle} example manufactures the Archimedean
+condition by adding $g_{\mathrm{ball}}(x) = N - \|x\|^2 \ge 0$ with
+large $N$, so the SDP is provably complete.
+
+\section{Equality constraints and free-sign multipliers}
+
+The invariant $s^2 + c^2 = 1$ in the pendulum/exact and unicycle examples
+is an \emph{equality} constraint. The multiplier $\mu(x)$ is an unrestricted
+polynomial (coefficients unconstrained), not SOS. The term $-\mu(x)h(x)$
+in~\eqref{eq:putinar} does not affect the sign condition on the manifold
+$h(x) = 0$ but provides degrees of freedom that can help satisfy the SOS
+condition off the manifold — a crucial mechanism for manifold-constrained
+systems.
+
+\section{The witness: Gram matrices for every multiplier}
+
+Every multiplier ($\lambda$, each $\sigma_j$, and the SOS certificate
+for $V - \varepsilon\|\Delta x\|^{2k}$) carries a Gram pair
+\texttt{(basis, Q)} with $Q \succeq 0$. This is what makes the certificate
+self-contained:
 \begin{enumerate}
-  \item $n = 1$ (univariate polynomials: every nonnegative polynomial is SOS);
-  \item $2d = 2$ (quadratic forms: $p(x) = x^\top Q x \succeq 0$ iff
-    $p$ is SOS);
-  \item $(n, 2d) = (2, 4)$ (ternary quartics, in the homogeneous case).
-\end{enumerate}
-In every other case, $\Sigma_{n,2d} \subsetneq \mathcal{P}_{n,2d}$
-strictly. For the Lyapunov problems in this toolbox, we operate almost
-always outside Hilbert's three cases --- the SOS condition is strictly
-sufficient, not necessary.
-
-\section{The Gram matrix parameterisation}
-\begin{proposition}[Gram representation]
-  Let $z(x)$ be the vector of all monomials of degree at most $d$, ordered
-  lexicographically. Then $p \in \R[x]$ with $\deg p \le 2d$ is SOS iff
-  there exists a positive semidefinite matrix $Q \succeq 0$ such that
-  \begin{equation}\label{eq:gram}
-    p(x) = {z(x)}^\top Q \, z(x).
-  \end{equation}
-  The size of $z(x)$ is $N = \binom{n+d}{d}$ and $Q \in \R^{N \times N}$.
-\end{proposition}
-\begin{proof}
-  \noindent\textbf{($\Leftarrow$)} Factor $Q = L L^\top$ (Cholesky). Then
-  \begin{equation}
-    p(x) = {z(x)}^\top L L^\top z(x)
-      = \sum_{i=1}^{N} {\bigl(\ell_i^\top z(x)\bigr)}^2,
-  \end{equation}
-  where $\ell_i$ is the $i$-th column of $L$. Each $\ell_i^\top z(x)$ is a
-  polynomial of degree at most $d$, and the sum of their squares is an
-  explicit SOS representation. This direction produces the certificate.
-
-  \noindent\textbf{($\Rightarrow$)} Let $p = \sum_i q_i^2$. Each $q_i$ is a
-  polynomial, and because $\deg p \le 2d$, every $q_i$ that contributes
-  must have $\deg q_i \le d$: any term in $q_i$ of degree $> d$ would
-  produce a monomial of degree $> 2d$ in $q_i^2$, and such terms cannot
-  cancel because each $q_i^2$ is nonnegative on monomials. This is the
-  Newton polytope argument~\cite{Reznick1978}: the support of each $q_i$
-  is contained in $\frac{1}{2}\operatorname{New}(p)$. Since $\deg q_i \le d$,
-  we can write $q_i = v_i^\top z(x)$ for some coefficient vector $v_i$, and
-  setting $L = [v_1\; \cdots\; v_k]$ gives $p = z^\top L L^\top z$ with
-  $Q = L L^\top \succeq 0$.
-\end{proof}
-
-\begin{remark}[Why this is an SDP]
-  The map $Q \mapsto$ coefficients of $z^\top Q z$ is linear, so matching
-  coefficients with $p$ gives $\binom{n+2d}{2d}$ affine equality constraints
-  on $Q$. Combined with $Q \succeq 0$, the feasible set is a
-  \emph{spectrahedron}. There are $N(N+1)/2$ free entries in $Q$ and
-  $\binom{n+2d}{2d}$ equations, so the representation is non-unique
-  whenever $N(N+1)/2 > \binom{n+2d}{2d}$. This non-uniqueness is the
-  freedom the SDP searches over --- it is what turns the parameterisation
-  from an algebraic identity into a computational method.
-\end{remark}
-
-\section{Newton polytope reduction}
-The monomial basis $z(x)$ can be restricted to lattice points in
-$\frac{1}{2}\operatorname{New}(p)$, half the Newton polytope of
-$p$~\cite{Reznick1978}. The argument: any monomial appearing in a square $q_i^2$
-of the SOS decomposition must have its exponent vector in the convex hull
-of the exponent vectors appearing in $q_i$, and therefore in
-$\frac{1}{2}\operatorname{New}(p)$. This reduces the size of $Q$ from
-$\binom{n+d}{d}$ to the number of lattice points in the half-Newton
-polytope. For the degree-6 Van der Pol Lyapunov candidate ($n=2$,
-$d=3$), this reduces $N$ from $\binom{5}{3}=10$ to $7$ --- a 30\% reduction
-in Gram matrix size.
-
-\emph{The current implementation does not exploit Newton polytope reduction;}
-$z(x)$ always uses the full monomial basis. This is noted so that a reader
-comparing Gram dimensions against the literature does not conclude the
-implementation is using a different parameterisation.
-
-\section{A fully worked example}
-Take $p(x_1, x_2) = x_1^4 + 2x_1^2 x_2^2 + x_2^4 + x_1^2 + x_2^2 + 1$,
-a quartic in two variables that is not an obvious perfect square.
-
-\medskip\noindent\textbf{Step 1: monomial basis.}
-$d = 2$, so $z(x) = {[1,\; x_1,\; x_2,\; x_1^2,\; x_1 x_2,\; x_2^2]}^\top$.
-$N = \binom{2+2}{2} = 6$.
-
-\medskip\noindent\textbf{Step 2: coefficient matching.}
-Write $Q = {[q_{ij}]}_{6 \times 6}$ (symmetric). Then
-\begin{align*}
-  z^\top Q z =\; &q_{11}
-    + 2q_{12}x_1 + 2q_{13}x_2 \\
-    &+ (2q_{14} + q_{22})x_1^2
-    + (2q_{15} + 2q_{23})x_1 x_2
-    + (2q_{16} + q_{33})x_2^2 \\
-    &+ 2q_{24} x_1^3 + (2q_{25} + 2q_{34})x_1^2 x_2
-    + (2q_{26} + 2q_{35})x_1 x_2^2 + 2q_{36}x_2^3 \\
-    &+ q_{44}x_1^4 + 2q_{45}x_1^3 x_2
-    + (2q_{46} + q_{55})x_1^2 x_2^2
-    + 2q_{56}x_1 x_2^3 + q_{66}x_2^4.
-\end{align*}
-Matching with $p$: $q_{11}=1$, $q_{12}=q_{13}=0$, $2q_{14}+q_{22}=1$,
-$2q_{15}+2q_{23}=0$, $2q_{16}+q_{33}=1$, all cubic coefficients $=0$,
-$q_{44}=1$, $q_{45}=0$, $2q_{46}+q_{55}=2$, $q_{56}=0$, $q_{66}=1$.
-
-\medskip\noindent\textbf{Step 3: a PSD choice.}
-Set $q_{22}=1$, giving $q_{14}=0$; set $q_{23}=0$, giving $q_{15}=0$;
-set $q_{33}=1$, giving $q_{16}=0$; set $q_{46}=0$, giving $q_{55}=2$.
-All cubic coefficients vanish automatically with $q_{24}=q_{25}=q_{26}=
-q_{34}=q_{35}=q_{36}=0$. This gives
-\begin{equation}
-  Q = \begin{bmatrix}
-    1 & 0 & 0 & 0 & 0 & 0 \\
-    0 & 1 & 0 & 0 & 0 & 0 \\
-    0 & 0 & 1 & 0 & 0 & 0 \\
-    0 & 0 & 0 & 1 & 0 & 0 \\
-    0 & 0 & 0 & 0 & 2 & 0 \\
-    0 & 0 & 0 & 0 & 0 & 1
-  \end{bmatrix} \succeq 0.
-\end{equation}
-
-\medskip\noindent\textbf{Step 4: Cholesky and explicit SOS.}
-$Q = L L^\top$ with $L = \operatorname{diag}(1,1,1,1,\sqrt{2},1)$. Then
-\begin{equation}
-  p(x) = 1^2 + x_1^2 + x_2^2 + {(x_1^2)}^2
-    + {(\sqrt{2}\,x_1 x_2)}^2 + {(x_2^2)}^2.
-\end{equation}
-
-\medskip\noindent\textbf{Step 5: verification.}
-Expanding: $1 + x_1^2 + x_2^2 + x_1^4 + 2x_1^2 x_2^2 + x_2^4 = p(x)$.
-
-\medskip\noindent\textbf{Comparison with the SDP solver.}
-The SDP solver produces a \emph{different} $Q$ --- typically not diagonal,
-with the free parameters chosen to maximise an interior-point objective.
-Both $Q$ matrices produce the same polynomial and both are PSD\@; the SDP
-merely picked a different point in the spectrahedron. This non-uniqueness
-is the reason SOS programs are convex: the feasible set is the intersection
-of an affine subspace with the PSD cone, and \emph{any} feasible point is
-a valid certificate.
-
-\section{Nonnegative but not SOS}
-The Motzkin polynomial~\cite{Motzkin1967}
-\begin{equation}\label{eq:motzkin}
-  M(x,y,z) = x^4 y^2 + x^2 y^4 - 3x^2 y^2 z^2 + z^6
-\end{equation}
-is nonnegative on $\R^3$ but \emph{not} a sum of squares.
-
-\medskip\noindent\textbf{Nonnegativity.} By the AM-GM inequality,
-\begin{equation}
-  \frac{x^4 y^2 + x^2 y^4 + z^6}{3}
-  \ge {(x^4 y^2 \cdot x^2 y^4 \cdot z^6)}^{1/3}
-  = {(x^6 y^6 z^6)}^{1/3} = x^2 y^2 z^2,
-\end{equation}
-so $x^4 y^2 + x^2 y^4 + z^6 \ge 3x^2 y^2 z^2$, hence $M(x,y,z) \ge 0$.
-
-\medskip\noindent\textbf{Not SOS.} Assume $M = \sum_i q_i^2$. Each $q_i$
-cannot contain the monomials $x^3$, $y^3$, $x z^2$, $y z^2$, $x^2 z$, $y^2 z$
-(they would produce terms absent from $M$). The only monomials that can
-appear in any $q_i$ are $x^2 y$, $x y^2$, $x y z$, $z^3$, $x z$, $y z$,
-$z^2$, $x^2$, $y^2$, $x y$, $x$, $y$, $z$, $1$. Now consider the coefficient
-of $x^2 y^2 z^2$ in $\sum q_i^2$. Every $q_i$ that produces $x^2 y^2 z^2$
-must contain $x y z$, and its square contributes $+1$ to that coefficient.
-But $M$ has coefficient $-3$ on $x^2 y^2 z^2$, so we need a source of
-\emph{negative} coefficient --- impossible in a sum of squares. Therefore
-$M$ is not SOS\@.
-
-The function \codelink{is\_sos}{julia/src/sos\_lyapunov.jl} returns
-\texttt{false} for $M$, and \path{test_sos_lyapunov.jl:motzkin_not_sos}
-asserts this.
-
-\section{Numerical reality}
-\begin{enumerate}
-  \item \textbf{Residual.} The SDP solver returns a floating-point $Q$.
-    The SOS identity $p(x) = {z(x)}^\top Q z(x)$ holds to solver tolerance,
-    not exactly. The typical Gram residual
-    $\|p - z^\top Q z\|_\infty$ is $10^{-10}$--$10^{-7}$ for the Clarabel
-    solver used throughout this toolbox.
-  \item \textbf{Conditioning.} The monomial basis $z(x)$ becomes
-    increasingly ill-conditioned at high degree. For the degree-6 Van der
-    Pol candidate ($n=2$, $d=3$), the condition number of the moment
-    matrix (evaluated on a unit-disk sample) is approximately $10^3$. At
-    degree 8 ($d=4$) this reaches $10^5$. This is not a defect of the
-    parameterisation --- it is intrinsic to the monomial basis --- and it
-    limits the practical degree to $\approx 8$ in two variables.
-  \item \textbf{Eigenvalue clipping.} The code clips eigenvalues
-    $\lambda < -10^{-8}$ to zero before accepting $Q$ as PSD\@. It
-    \emph{refuses} to clip a genuinely negative eigenvalue (i.e.~an
-    eigenvalue below $-10^{-4}$) and reports it as a verification failure.
-    A certificate with a clipped negative eigenvalue is not a certificate.
-  \item \textbf{Rational rounding.} Peyrl and Parrilo (2008) and
-    Powers and W\"ormann give methods for rounding a floating-point Gram
-    matrix to an exact rational certificate. This is \emph{not implemented}
-    here. An honest omission is stronger than an implied capability.
+  \item \texttt{verify\_certificate(cert, sys)} reconstructs the \emph{target}
+    polynomial for each Gram pair from the certificate's own data.
+  \item For $\lambda$: the target is $\lambda$ itself (the multiplier
+    is the certificate that it is SOS).
+  \item For the derivative: the target is
+    $-\dot{V} - \varepsilon\|\Delta x\|^{2k} + \lambda(V - \rho)
+     - \sum \sigma_j g_j - \sum \mu_k h_k$.
+  \item \texttt{gram\_residual(target, basis, Q)} checks that the
+    Gram matrix reproduces its target polynomial, not just that $Q$ is PSD.
 \end{enumerate}
 
-\section{What this buys and what it does not}
-SOS feasible $\Rightarrow$ nonnegative: a proof, modulo the numerical caveats
-above. SOS infeasible $\Rightarrow$ nothing. Not ``no certificate exists'',
-but ``no certificate exists \emph{at this degree, in this basis, for this
-multiplier structure}''. This distinction is three sentences and it is why
-a reader will trust every certificate in this repository.
+A Gram matrix that is PSD but paired with the \emph{wrong} basis monomials
+(or that reconstructs a different polynomial from the target) is detected
+and rejected by the residual check.
+
+\section{The obstacle constraint: example}
+
+For the unicycle with obstacle, $g_{\mathrm{obs}}(x) = (x - x_o)^2 +
+(y - y_o)^2 - r^2 \ge 0$. The S-procedure term is
+$-\sigma_{\mathrm{obs}}(x) g_{\mathrm{obs}}(x)$, which adds a positive
+penalty when $g_{\mathrm{obs}} < 0$ (inside the obstacle), making the
+derivative constraint \emph{harder} to satisfy there. The certified set
+is thus provably obstacle-free: the certificate holds only on
+$\{g_{\mathrm{obs}} \ge 0\}$.
+
+\section{Relation to SOS decomposition}
+
+The companion document \texttt{sos\_decomposition.tex} covers the Gram matrix
+parameterisation that makes these programs SDPs. The key insight of
+Putinar's Positivstellensatz is that the same Gram matrix machinery extends
+from global positivity to constrained positivity: the multipliers absorb
+the constraints, turning a local condition into a \emph{global} SOS check.
 
 \begin{thebibliography}{9}
+\bibitem{Putinar1993} M.~Putinar, ``Positive polynomials on compact
+  semi-algebraic sets'', \emph{Indiana Univ. Math. J.}, vol.~42, no.~3,
+  pp.~969--984, 1993.
 \bibitem{Parrilo2000} P.~A.~Parrilo, ``Structured semidefinite programs
   and semialgebraic geometry methods in robustness and optimization'',
   Ph.D.~dissertation, Caltech, 2000.
-\bibitem{Reznick1978} B.~Reznick, ``Extremal PSD forms with few terms'',
-  \emph{Duke Math. J.}, vol.~45, no.~2, pp.~363--374, 1978.
-\bibitem{Motzkin1967} T.~S.~Motzkin, ``The arithmetic-geometric
-  inequality'', in \emph{Inequalities}, O.~Shisha, Ed. Academic Press,
-  1967, pp.~205--224.
 \bibitem{Blekherman2013} G.~Blekherman, P.~A.~Parrilo, and R.~R.~Thomas,
   \emph{Semidefinite Optimization and Convex Algebraic Geometry}.
   SIAM, 2013.
-\bibitem{PeyrlParrilo2008} H.~Peyrl and P.~A.~Parrilo, ``Computing sum
-  of squares decompositions with rational coefficients'',
-  \emph{Theor. Comput. Sci.}, vol.~409, no.~2, pp.~269--281, 2008.
+\bibitem{Lasserre2015} J.~B.~Lasserre, \emph{An Introduction to Polynomial
+  and Semi-Algebraic Optimization}. Cambridge University Press, 2015.
 \end{thebibliography}
 
 \end{document}

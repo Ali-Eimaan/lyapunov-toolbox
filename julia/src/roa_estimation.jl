@@ -90,10 +90,13 @@ function bisect_level_set(sys::PolynomialSystem, V; opts::SOSOptions = SOSOption
             end
             ρ_hi *= 2.0
         end
-        if !found_infeasible && opts.verbose
-            @warn("bisect_level_set: no infeasible ρ found after 30 doublings; " *
-                  "the system appears globally stable — returning doubling cap " *
-                  "ρ_hi = $ρ_hi as a generous over-estimate.")
+        if !found_infeasible
+            throw(ErrorException(
+                "bisect_level_set: no infeasible ρ found after 30 doublings up to " *
+                "ρ_hi = $ρ_hi; the system may be globally stable or the solver " *
+                "may be accepting infeasible points.  Returning an arbitrary cap " *
+                "is not acceptable — the ρ estimate is meaningless without an " *
+                "upper bound."))
         end
     end
 
@@ -116,10 +119,24 @@ function bisect_level_set(sys::PolynomialSystem, V; opts::SOSOptions = SOSOption
         end
     end
     # Final verification at best: re-run to get the witness.
-    feasible_final, witness = verify_sublevel_set(sys, V, best; opts = opts)
-    n_sdps += 1
-    solve_time_acc += witness.solve_time
-    @assert feasible_final "bisect_level_set: best ρ = $best is not feasible on re-verification"
+    # Skip re-verification when best == ρ_lo (no larger level was found
+    # feasible) — ρ_lo is the trivial lower bound and was not itself
+    # verified, so re-running at it may fail on a system whose V is not
+    # a global Lyapunov function.  Return the witness from the last
+    # feasible solve (if any), or re-run at best otherwise.
+    if best <= ρ_lo
+        # No level > ρ_lo was feasible; return the last witness.
+        # If we never solved at best, run one SDP at best to get a witness.
+        feasible_final, witness = verify_sublevel_set(sys, V, best; opts = opts)
+        n_sdps += 1
+        solve_time_acc += witness.solve_time
+        # Don't assert — best=0 may not be feasible for a bad V.
+    else
+        feasible_final, witness = verify_sublevel_set(sys, V, best; opts = opts)
+        n_sdps += 1
+        solve_time_acc += witness.solve_time
+        @assert feasible_final "bisect_level_set: best ρ = $best is not feasible on re-verification"
+    end
     return best, witness, n_sdps, solve_time_acc
 end
 
@@ -149,12 +166,14 @@ function estimate_roa(sys::PolynomialSystem, V; opts::SOSOptions = SOSOptions())
     Vd = lie_derivative(V, sys.f, x)
     ms = monomials(Vd)
     dVd = isempty(ms) ? 0 : maximum(degree, ms)
-    sdp_size = gram_dimension(length(x), cld(dVd, 2))
+    k = max(1, cld(dVd, 2))
+    sdp_size = gram_dimension(length(x), k)
     cert = LyapunovCertificate(
         V, ρ, x,
         witness.multipliers,
         witness.grams,
         opts.ε,
+        k,
         sys.name,
         witness.status,
         solve_time,
@@ -219,11 +238,11 @@ function v_s_iteration(sys::PolynomialSystem; opts::SOSOptions = SOSOptions(),
     cert0 = estimate_roa(sys, V; opts = opts)
     ρ0 = cert0.ρ
     push!(ρ_history, ρ0)
-    # β0: find the shape-set level for the initial V.
-    # Computed on the raw (possibly unnormalised) V.  In the first
-    # V-s iteration, V is rescaled to ρ ≡ 1, so β1 may differ from β0.
-    # The monotonicity check below only applies from iteration 2 onward.
-    β0 = beta_step(sys, V, shape; opts = opts)
+    # β0: computed on the normalised V/ρ0 so that it is directly comparable to
+    # β1 (which sees V_scaled = V_current/ρ_current at ρ ≡ 1).  Computing β0 on
+    # the raw unnormalised V made the iteration‑1 monotonicity check meaningless.
+    V_scaled0 = V / ρ0
+    β0 = beta_step(sys, V_scaled0, shape; opts = opts)
     push!(β_history, β0)
     vol0, _ = roa_volume(V, ρ0, x; method = :montecarlo)
     push!(volume_history, vol0)
@@ -241,16 +260,18 @@ function v_s_iteration(sys::PolynomialSystem; opts::SOSOptions = SOSOptions(),
         total_sdps += 1
         total_time += w_γ.solve_time
         if !feasible_γ
-            opts.verbose && @warn("v_s_iteration γ-step infeasible at iteration $iter — solver may have failed; keeping previous certificate")
-            break
+            throw(ErrorException(
+                "v_s_iteration: γ-step (multiplier_step) infeasible at iteration $iter " *
+                "with solver status $(w_γ.status); feasibility is preserved by the " *
+                "iteration and an infeasible γ-step means the SDP failed to solve."))
         end
 
         # β-step: find largest β with {shape ≤ β} ⊆ {V_scaled ≤ 1}.
         β_new = beta_step(sys, V_scaled, shape; opts = opts)
 
-        # Monotonicity check (iteration 1 is exempt: β0 was computed on the
-        # unnormalised seed V, but V_scaled here is normalised).
-        if iter > 1 && β_new < β_old - 1e-8
+        # Monotonicity check: β must be non-decreasing because each V-step
+        # starts from the previous iterate and can't do worse.
+        if β_new < β_old - 1e-8
             throw(ErrorException(
                 "v_s_iteration: β decreased from $β_old to $β_new at iteration $iter; " *
                 "this violates the monotonicity guarantee and indicates ρ was not " *
@@ -263,8 +284,11 @@ function v_s_iteration(sys::PolynomialSystem; opts::SOSOptions = SOSOptions(),
         total_sdps += 1
         total_time += w_v.solve_time
         if !feasible_v
-            opts.verbose && @warn("v_s_iteration V-step infeasible at iteration $iter — solver may have failed; keeping previous V")
-            break
+            throw(ErrorException(
+                "v_s_iteration: V-step (v_step) infeasible at iteration $iter " *
+                "with solver status $(w_v.status); the V-step is feasible whenever " *
+                "the previous iterate is, so an infeasible V-step means the SDP " *
+                "failed to solve."))
         end
 
         # Renormalise: ρ ≡ 1, so new V is V_new with ρ = 1.
@@ -284,12 +308,32 @@ function v_s_iteration(sys::PolynomialSystem; opts::SOSOptions = SOSOptions(),
             "v_s_iteration: V at iteration $iter produced an unbounded sublevel set " *
             "(evidence: $evidence); the V-step should preserve boundedness."))
 
+        Vd = lie_derivative(V_current, sys.f, x)
+        ms = monomials(Vd)
+        dVd = isempty(ms) ? 0 : maximum(degree, ms)
+        k = max(1, cld(dVd, 2))
+
+        # Build certificate from the V-step witness (R1-7 fix).
+        # The γ-step's w_γ.grams belong to V_scaled (previous V), not V_current.
+        # The V-step's w_v.grams belong to V_new ≡ V_current and must be used.
+        # Multipliers: λ comes from the γ-step (only source), σ and μ from the
+        # V-step (computed fresh for V_new, not inherited from V_scaled).
+        multipliers = copy(w_v.multipliers)
+        multipliers[:λ] = w_γ.multipliers[:λ]  # λ from γ-step; σ,μ from V-step
+        all_grams = copy(w_v.grams)
+        # Also carry the γ-step's :λ Gram (for its own SOS certificate).
+        if haskey(w_γ.grams, :λ)
+            all_grams[:λ] = w_γ.grams[:λ]
+        end
+        # :shape_containment Gram belongs to the V-step (uses V_new).
+        # Already in w_v.grams from v_step.
+
         cert = LyapunovCertificate(
             V_current, ρ_current, x,
-            w_γ.multipliers, w_γ.grams,
-            opts.ε, sys.name,
-            w_γ.status, w_γ.solve_time + w_v.solve_time,
-            gram_dimension(length(x), cld(maximum(degree, monomials(V_current)), 2)),
+            multipliers, all_grams,
+            opts.ε, k, sys.name,
+            w_v.status, w_v.solve_time + w_γ.solve_time,
+            gram_dimension(length(x), k),
             bounded, evidence,
         )
         best_cert = cert
@@ -330,7 +374,10 @@ function roa_volume(V, ρ::Real, x::AbstractVector; method::Symbol = :montecarlo
                     samples::Integer = 200_000, box = nothing,
                     rng::Random.AbstractRNG = Random.default_rng())
     n = length(x)
-    if method === :grid && n <= 2
+    if method === :grid
+        n <= 2 || throw(ArgumentError(
+            "roa_volume: :grid method is only supported for n ≤ 2 (got n = $n); " *
+            "use :montecarlo for higher dimensions"))
         # Deterministic grid integration for 1-D / 2-D.
         if box === nothing
             box = _estimate_box(V, ρ, x; rng = rng)
@@ -344,10 +391,6 @@ function roa_volume(V, ρ::Real, x::AbstractVector; method::Symbol = :montecarlo
         count = 0
         for y in ys, xv in xs
             pt = [xv, y]
-            if n > 2
-                # Pin remaining variables (slice).
-                error("grid method only supported for n ≤ 2 in this implementation")
-            end
             if convert(Float64, V(x => pt)) <= ρ
                 count += 1
             end
@@ -373,8 +416,10 @@ function roa_volume(V, ρ::Real, x::AbstractVector; method::Symbol = :montecarlo
     end
 end
 
-function _estimate_box(V, ρ, x; radius::Real = 50.0, rng = Random.default_rng())
+function _estimate_box(V, ρ, x; radius::Real = 50.0, rng = Random.default_rng(), eq = nothing)
     n = length(x)
+    # Centre on the equilibrium, not the origin (R1-16).
+    eq_vec = eq === nothing ? zeros(n) : collect(eq)
     lo = fill(Inf, n)
     hi = fill(-Inf, n)
     for _ in 1:2000
@@ -384,14 +429,14 @@ function _estimate_box(V, ρ, x; radius::Real = 50.0, rng = Random.default_rng()
         lo_r, hi_r = 0.0, 100.0
         for _ in 1:50
             mid = (lo_r + hi_r) / 2
-            pt = mid .* (u ./ nrm)
+            pt = eq_vec .+ mid .* (u ./ nrm)
             if convert(Float64, V(x => pt)) <= ρ
                 lo_r = mid
             else
                 hi_r = mid
             end
         end
-        pt = lo_r .* (u ./ nrm)
+        pt = eq_vec .+ lo_r .* (u ./ nrm)
         lo = min.(lo, pt)
         hi = max.(hi, pt)
     end
@@ -417,7 +462,19 @@ the innermost one.
 """
 function roa_boundary_2d(V, ρ::Real, x::AbstractVector; xlim, ylim, n::Integer = 400, fixed = Dict())
     boundary = Tuple{Float64,Float64}[]
-    angles = range(0, 2π; length = n)
+    # range(0, 2π; length = n) includes BOTH endpoints, so the first and last
+    # angles coincide (a duplicate boundary point that breaks the closed polygon
+    # and double-counts a ray). Drop the duplicate endpoint.
+    angles = range(0, 2π; length = n + 1)[1:n]
+    # Centre rays on the equilibrium, not the origin (R1-16).
+    eq = haskey(fixed, :equilibrium) ? fixed[:equilibrium] : zeros(2)
+    eq_x = eq[1]
+    eq_y = eq[2]
+    # Use xlim/ylim to set the max radius, default 100.
+    max_radius = 100.0
+    if xlim !== nothing && ylim !== nothing
+        max_radius = 2.0 * max(xlim[2] - xlim[1], ylim[2] - ylim[1])
+    end
     for θ in angles
         d = [cos(θ), sin(θ)]
         # Detect multiple crossings by coarse sampling.
@@ -425,8 +482,10 @@ function roa_boundary_2d(V, ρ::Real, x::AbstractVector; xlim, ylim, n::Integer 
         crossings = 0
         prev = nothing
         for k in 0:ns
-            r = 0.0 + 100.0 * k / ns
-            val = convert(Float64, V(x => [r * d[1], r * d[2]])) - ρ
+            r = 0.0 + max_radius * k / ns
+            # Evaluate at equilibrium + r·direction
+            pt = [eq_x + r * d[1], eq_y + r * d[2]]
+            val = convert(Float64, V(x => pt)) - ρ
             s = val > 0 ? 1 : (val < 0 ? -1 : 0)
             if prev !== nothing && s != prev && s != 0
                 crossings += 1
@@ -442,16 +501,17 @@ function roa_boundary_2d(V, ρ::Real, x::AbstractVector; xlim, ylim, n::Integer 
                 "Ray-marching is not valid in this case."))
         end
         # Bisect for the crossing.
-        r_lo, r_hi = 0.0, 100.0
+        r_lo, r_hi = 0.0, max_radius
         for _ in 1:60
             mid = (r_lo + r_hi) / 2
-            if convert(Float64, V(x => [mid * d[1], mid * d[2]])) <= ρ
+            pt_mid = [eq_x + mid * d[1], eq_y + mid * d[2]]
+            if convert(Float64, V(x => pt_mid)) <= ρ
                 r_lo = mid
             else
                 r_hi = mid
             end
         end
-        push!(boundary, (r_lo * d[1], r_lo * d[2]))
+        push!(boundary, (eq_x + r_lo * d[1], eq_y + r_lo * d[2]))
     end
     return boundary
 end
@@ -481,7 +541,8 @@ function true_roa_boundary_2d(sys::PolynomialSystem; xlim, ylim, n::Integer = 20
     x_eq = eq[1]
     y_eq = eq[2]
     boundary = Tuple{Float64,Float64}[]
-    angles = range(0, 2π; length = n)
+    # Same duplicate-endpoint issue as roa_boundary_2d: drop the last angle.
+    angles = range(0, 2π; length = n + 1)[1:n]
     for θ in angles
         d = [cos(θ), sin(θ)]
         # Bisect on radius to find largest r that converges to equilibrium.
@@ -515,7 +576,7 @@ function true_roa_boundary_2d(sys::PolynomialSystem; xlim, ylim, n::Integer = 20
 end
 
 """
-    containment_fraction(V, ρ, x, boundary_points)
+    containment_fraction(V, ρ, x, boundary_points; rng = Random.default_rng())
 
 Fraction of the area enclosed by `boundary_points` (the true ROA estimate) that
 is also inside `{V ≤ ρ}` — the headline "how good is this inner approximation"
@@ -526,7 +587,8 @@ Also return the complementary check: the fraction of `{V ≤ ρ}` that lies
 approximation, and if it is not, the certificate is wrong and no amount of
 volume improvement matters. Report both, always, in that order.
 """
-function containment_fraction(V, ρ::Real, x::AbstractVector, boundary_points)
+function containment_fraction(V, ρ::Real, x::AbstractVector, boundary_points;
+                              rng::Random.AbstractRNG = Random.default_rng())
     # Polygon area by shoelace formula.
     n_pts = length(boundary_points)
     function poly_area(pts)
@@ -552,8 +614,8 @@ function containment_fraction(V, ρ::Real, x::AbstractVector, boundary_points)
     box_area = (x_hi - x_lo) * (y_hi - y_lo)
 
     for _ in 1:ns
-        px = x_lo + (x_hi - x_lo) * rand()
-        py = y_lo + (y_hi - y_lo) * rand()
+        px = x_lo + (x_hi - x_lo) * rand(rng)
+        py = y_lo + (y_hi - y_lo) * rand(rng)
         in_true = _point_in_polygon((px, py), boundary_points)
         if in_true
             inside_true += 1
@@ -569,12 +631,12 @@ function containment_fraction(V, ρ::Real, x::AbstractVector, boundary_points)
     inside_v = 0
     outside_true = 0
     # Use box from _estimate_box.
-    box = _estimate_box(V, ρ, x)
+    box = _estimate_box(V, ρ, x; rng = rng)
     x_lo2, x_hi2 = box[1][1], box[1][2]
     y_lo2, y_hi2 = box[2][1], box[2][2]
     for _ in 1:ns2
-        px = x_lo2 + (x_hi2 - x_lo2) * rand()
-        py = y_lo2 + (y_hi2 - y_lo2) * rand()
+        px = x_lo2 + (x_hi2 - x_lo2) * rand(rng)
+        py = y_lo2 + (y_hi2 - y_lo2) * rand(rng)
         if convert(Float64, V(x => [px, py])) <= ρ
             inside_v += 1
             if !_point_in_polygon((px, py), boundary_points)
@@ -609,7 +671,10 @@ end
 
 One row of the table in `docs/benchmarks.md`, as a `NamedTuple`:
 system, `n`, `deg V`, `deg λ`, `ρ`, estimated volume, fraction of true ROA,
-largest SDP block, number of SDPs, total solve time, solver, and the ε used.
+largest SDP block, number of SDPs, total solve time, solver, the ε used, and the
+margin exponent `k` (the positivity margin is `ε‖x - x_eq‖^{2k}`).
+`fraction_true_roa` is `missing` — it must be set externally, so a `missing`
+landing in a published table is not mistaken for a computed value.
 
 Emitting the table from code rather than typing it is the difference between a
 benchmark and a claim. `docs/benchmarks.md` is generated from these rows.
@@ -625,10 +690,10 @@ function benchmark_row(sys::PolynomialSystem, result::ROAResult; label::Abstract
     end
     ρ_val = cert.ρ
     vol, _ = roa_volume(V, ρ_val, x; method = :montecarlo)
-    block_size = cert.gram_dim
-    n_sdps = result.total_sdps
-    solve_time = result.total_time
-    solver_name = string(cert.solver)
+    block_size = cert.sdp_size
+    n_sdps = result.n_sdps
+    solve_time = result.total_solve_time
+    solver_name = string(result.opts.solver)
     ε_val = cert.ε
 
     return (;
@@ -638,11 +703,13 @@ function benchmark_row(sys::PolynomialSystem, result::ROAResult; label::Abstract
         deg_λ = λ_deg,
         ρ = ρ_val,
         volume = vol,
-        fraction_true_roa = NaN,  # must be set externally
+        fraction_true_roa = missing,  # must be set externally; `missing` so a
+                                      # NaN cannot be mistaken for a computed value
         max_sdp_block = block_size,
         num_sdps = n_sdps,
         solve_time_s = solve_time,
         solver = solver_name,
         epsilon = ε_val,
+        margin_k = cert.k,
     )
 end

@@ -77,6 +77,22 @@ def plot_roa_2d(
     if ax is None:
         _, ax = plt.subplots()
 
+    # Rule 3 of the module docstring: a slice of an n > 2 certificate must state
+    # its pinned values. `boundary_2d` defaults unplotted coordinates to 0, which
+    # for e.g. the unicycle (x_eq = (0,0,0,1)) is a point off the invariant
+    # manifold entirely — an unlabelled slice through c = 0, not a picture of the
+    # ROA. Refuse to draw it rather than mislabel it.
+    if certificate.n_vars > 2:
+        non_axis = set(range(certificate.n_vars)) - set(axes)
+        unpinned = sorted(non_axis - set((fixed or {}).keys()))
+        if unpinned:
+            pinned_hint = ", ".join(f"{k}: ..." for k in unpinned)
+            raise ValueError(
+                f"plot_roa_2d: certificate has {certificate.n_vars} variables but "
+                f"coordinate(s) {unpinned} are not pinned. Pass "
+                f"fixed={{{pinned_hint}}} to state the slice, or plot a 2-D certificate."
+            )
+
     boundary = certificate.boundary_2d(axes=axes, fixed=fixed)
     bx, by = boundary[:, 0], boundary[:, 1]
 
@@ -85,10 +101,16 @@ def plot_roa_2d(
     ax.plot(bx, by, color="C0", linewidth=1.5)
 
     if show_level_curves:
-        # Interior contours at ρ * [0.25, 0.5, 0.75].
+        # Interior contours at ρ * [0.25, 0.5, 0.75]. These are genuine level
+        # sets {V = ρ·frac}, re-bisected along each ray — NOT the boundary scaled
+        # radially by sqrt(frac), which reproduces {V = ρ·frac} only for a
+        # homogeneous quadratic V and silently under-draws every interior contour
+        # of a degree-4/6 candidate.
         for frac in [0.25, 0.5, 0.75]:
-            # Scale the boundary inward.
-            ax.plot(bx * np.sqrt(frac), by * np.sqrt(frac), color="C0",
+            inner = certificate.boundary_2d(
+                axes=axes, fixed=fixed, level=certificate.rho * frac
+            )
+            ax.plot(inner[:, 0], inner[:, 1], color="C0",
                     linewidth=0.5, linestyle="--", alpha=0.5)
 
     if true_boundary is not None:
@@ -132,8 +154,16 @@ def plot_phase_portrait(
     density: float = 1.2,
     trajectories: Sequence[Array] = (),
     fixed: dict[int, float] | None = None,
+    n_vars: int | None = None,
 ) -> Any:
-    """Streamplot of the vector field, with optional overlaid trajectories."""
+    """Streamplot of the vector field, with optional overlaid trajectories.
+
+    ``n_vars`` is the state dimension; it is *not* derived from ``len(fixed) + 2``
+    because a caller may pin only some of the non-axis coordinates (and the
+    ``dynamics`` callable then receives a wrong-length vector). Pass it
+    explicitly; it defaults to ``len(fixed) + 2`` only for convenience when every
+    non-axis coordinate is pinned.
+    """
     import matplotlib.pyplot as plt
 
     if ax is None:
@@ -141,7 +171,19 @@ def plot_phase_portrait(
 
     if fixed is None:
         fixed = {}
-    n_vars = len(fixed) + 2
+    if n_vars is None:
+        n_vars = len(fixed) + 2
+    else:
+        # Guard against the exact bug this argument exists to fix: a caller who
+        # pins only some coordinates and forgets n_vars.
+        unpinned = [k for k in range(n_vars) if k not in set(axes) and k not in fixed]
+        if unpinned:
+            raise ValueError(
+                f"plot_phase_portrait: n_vars={n_vars} but coordinate(s) {unpinned} "
+                f"are neither pinned in `fixed` nor among `axes`. The dynamics "
+                f"callable would receive a vector with zeros in those entries. "
+                f"Pin them or pass the true n_vars."
+            )
 
     x_vals = np.linspace(xlim[0], xlim[1], int(30 * density))
     y_vals = np.linspace(ylim[0], ylim[1], int(30 * density))

@@ -41,11 +41,23 @@ class TestSessionStartup:
     @pytest.mark.julia
     def test_conflicting_session_config_raises(self):
         """Requesting a different backend or project after startup raises."""
+        import pytest
+
         from lyapunov_toolbox.julia_bridge import get_session
         s = get_session()  # Ensure initialised
         # Re-requesting with same config should return same session (no error)
         s2 = get_session()
         assert s is s2
+        # Requesting a different backend must raise, naming both configs.
+        other_backend = "pyjulia" if s._backend == "juliacall" else "juliacall"
+        with pytest.raises(RuntimeError) as excinfo:
+            get_session(backend=other_backend)
+        msg = str(excinfo.value)
+        assert s._backend in msg and other_backend in msg
+        # Requesting a different project must also raise, naming both paths.
+        with pytest.raises(RuntimeError) as excinfo2:
+            get_session(project="/nonexistent/other/project")
+        assert "/nonexistent/other/project" in str(excinfo2.value)
 
     def test_missing_backend_error_names_the_fix(self):
         """With an invalid project path, error message contains Pkg.instantiate()."""

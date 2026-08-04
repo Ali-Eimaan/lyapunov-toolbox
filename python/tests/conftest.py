@@ -10,6 +10,21 @@ from __future__ import annotations
 import pytest
 
 
+def pytest_addoption(parser):
+    """Declare ``--require-julia`` so ``getoption`` never falls back to a default.
+
+    ``pytest_collection_modifyitems`` reads this option; without an
+    ``addoption`` hook the flag cannot be passed on the command line and the
+    "fail instead of skip" CI mode is unreachable.
+    """
+    parser.addoption(
+        "--require-julia",
+        action="store_true",
+        default=False,
+        help="Fail (instead of skip) when the Julia backend is unavailable",
+    )
+
+
 def pytest_collection_modifyitems(config, items):
     """Skip ``@pytest.mark.julia`` tests when the backend cannot start."""
     import os
@@ -17,7 +32,7 @@ def pytest_collection_modifyitems(config, items):
     from lyapunov_toolbox.julia_bridge import julia_available
 
     require = (
-        config.getoption("--require-julia", default=False)
+        config.getoption("--require-julia")
         or os.environ.get("LYAPUNOV_TOOLBOX_REQUIRE_JULIA") == "1"
     )
 
@@ -58,7 +73,14 @@ def vdp_certificate(julia_session):
     f_expr = "[-x2, x1 + (x1^2 - 1)*x2]"
     cert = certify_roa(f_expr, variables=("x1", "x2"), V_degree=4)
     if not cert.verified:
-        pytest.skip("Van der Pol certificate failed verification")
+        # A skipped fixture makes the *dependent* tests pass vacuously; a
+        # certificate that fails verification is a real bug in the SOS code and
+        # the suite must say so.
+        pytest.fail(
+            "Van der Pol certificate failed verification: the SOS program solved "
+            "but verify_certificate rejected the result (algebraic/sampling/"
+            "dynamical). Check solver tolerances or the multiplier degree."
+        )
     return cert
 
 

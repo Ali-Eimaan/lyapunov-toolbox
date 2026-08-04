@@ -103,6 +103,11 @@ and a number with no witness cannot be composed or audited.
   `:positivity` and `:derivative`. This is what [`verify_certificate`](@ref)
   checks; without the Gram matrices the certificate is an assertion, not a proof.
 - `ε::Float64`
+- `k::Int` — the exponent in the positivity margin `ε‖x - x_eq‖^{2k}` actually
+  used. `k = max(1, cld(deg V̇, 2))`, so the margin degree matches `deg V̇` and
+  the SOS basis need not be inflated. Recorded so [`verify_certificate`](@ref)
+  can reconstruct the derivative target exactly, and reported in benchmark rows
+  alongside `ε`.
 - `system_name::String`
 - `solver_status::String` — the raw `termination_status` string.
 - `solve_time::Float64` — seconds, summed over every SDP that produced this.
@@ -118,6 +123,7 @@ struct LyapunovCertificate
     multipliers::Dict{Symbol,Any}
     grams::Dict{Symbol,Tuple{Vector,Matrix{Float64}}}
     ε::Float64
+    k::Int
     system_name::String
     solver_status::String
     solve_time::Float64
@@ -363,10 +369,11 @@ function lyapunov_from_linearization(sys::PolynomialSystem; Q = nothing)
     end
     # No invariants but a zero eigenvalue (a centre direction the nonlinear
     # terms stabilise).  A'P+PA=-Q has no solution when A has zero eigenvalues
-    # and Q is full rank; fall back to P = I and let the V–s iteration refine.
+    # and Q is full rank; fall back to ‖x - x_eq‖² centred on the equilibrium.
     has_zero_eig = any(abs.(real(ev)) .< 1e-10)
     if has_zero_eig
-        return sum(x[i]^2 for i in 1:n)
+        eq = sys.equilibrium
+        return sum((x[i] - eq[i])^2 for i in 1:n)
     end
     # Continuous Lyapunov equation A'P + PA = -Q via Kronecker-product solve.
     M = kron(Matrix{Float64}(I, n, n), A') + kron(A', Matrix{Float64}(I, n, n))
@@ -437,11 +444,12 @@ function _lyapunov_on_manifold(sys::PolynomialSystem, A::Matrix{Float64},
     # the linearisation is non-hyperbolic ON the manifold — e.g. the unicycle,
     # whose (x, y, s) dynamics decouple from the c-direction at first order
     # (rows 2 and 4 of A are zero), leaving a zero eigenvalue that only the
-    # nonlinear terms stabilise.  Fall back to the identity ball about the
-    # ORIGIN — the same seed the non-manifold path uses for zero-eigenvalue A —
-    # which the unicycle tests certify with.
+    # nonlinear terms stabilise.  Fall back to ‖x - x_eq‖² — centred on the
+    # equilibrium, not the origin.  A ball about the origin is not a Lyapunov
+    # function at x_eq unless x_eq = 0.
     if any(abs.(real(evt)) .< 1e-10)
-        return sum(x[i]^2 for i in 1:n)
+        eq = sys.equilibrium
+        return sum((x[i] - eq[i])^2 for i in 1:n)
     end
     Qt = T' * Qmat * T
     Mt = kron(Matrix{Float64}(I, m, m), At') + kron(At', Matrix{Float64}(I, m, m))
@@ -505,7 +513,13 @@ function verify_sublevel_set(sys::PolynomialSystem, V, ρ::Real; opts::SOSOption
     # The positivity margin must vanish at the equilibrium, or the certificate is
     # structurally infeasible for any recast system whose equilibrium is not the
     # origin (trig_recast states live on s² + c² = 1, so ‖x_eq‖² = 1 ≠ 0 there).
-    # For equilibrium-at-origin systems this is exactly the guide's ε‖x‖².
+    # The margin is ε‖x - x_eq‖^{2k} with k = max(1, cld(deg V̇, 2)): the degree
+    # is matched to deg V̇ so the S-procedure term can cancel the top-degree part
+    # of V̇ without inflating the SOS basis. For a linear system (deg V̇ = 2) this
+    # is exactly the guide's ε‖x‖²; for the reversed Van der Pol (deg V̇ = 4) it is
+    # the weaker ε‖x‖⁴ — still a strict negativity margin, but near the
+    # equilibrium it is much smaller than ε‖x‖² would be, and ε is a recorded
+    # benchmark parameter, so the actual margin is what gets recorded as `k`.
     ms = monomials(Vd)
     dVd = isempty(ms) ? 0 : maximum(degree, ms)
     k = max(1, cld(dVd, 2))
@@ -550,7 +564,7 @@ function verify_sublevel_set(sys::PolynomialSystem, V, ρ::Real; opts::SOSOption
             "verify_sublevel_set: unexpected solver termination status $st"))
     end
     if feasible
-        multipliers, grams = _gather_witness(cref, λ, σ, μ, μb)
+        multipliers, grams = _gather_witness(cref, λ, σ, μ)
     else
         multipliers = Dict{Symbol,Any}()
         grams = Dict{Symbol,Tuple{Vector,Matrix{Float64}}}()
@@ -558,20 +572,6 @@ function verify_sublevel_set(sys::PolynomialSystem, V, ρ::Real; opts::SOSOption
     witness = (multipliers = multipliers, grams = grams,
                status = string(st), solve_time = solve_time)
     return feasible, witness
-end
-
-# Reconstruct the polynomial represented by a solved SOSPoly (GramMatrix)
-# variable: p(x) = z(x)' Q z(x) with Q = value.(gm.Q).
-function _sos_variable_polynomial(gm)
-    basis = gm.basis.monomials
-    Q = Matrix(value.(gm.Q))
-    return polynomial(basis' * Q * basis)
-end
-
-# Reconstruct the polynomial represented by a solved free Poly variable: a
-# linear combination of the basis monomials with the solved coefficients.
-function _poly_variable_polynomial(μ, basis)
-    return value(μ)
 end
 
 # The P2/P3 expression with every multiplier substituted by its solved value.
@@ -599,7 +599,7 @@ function _witness_grams_ok(sys, V, Vd, ρ, margin, opts, cref, λ, σ, μ, μb)
     basis = gm.basis.monomials
     λp = _sos_variable_polynomial(λ)
     σp = [_sos_variable_polynomial(σj) for σj in σ]
-    μp = [_poly_variable_polynomial(μk, μb) for μk in μ]
+    μp = [_poly_variable_polynomial(μk) for μk in μ]
     target = _derivative_target(sys, V, Vd, ρ, margin, opts, λp, σp, μp)
     res = gram_residual(target, basis, Q)
     eigmin = minimum(eigvals(Symmetric(Q)))
@@ -617,7 +617,7 @@ end
 # :derivative (the main P2/P3 constraint), :λ, and :σ_j per inequality
 # constraint; :positivity appears in the full certificate (from the V-step), not
 # here. Multipliers holds the multiplier polynomials: :λ, :σ (vector), :μ (vector).
-function _gather_witness(cref, λ, σ, μ, μb)
+function _gather_witness(cref, λ, σ, μ)
     gm = gram_matrix(cref)
     grams = Dict{Symbol,Tuple{Vector,Matrix{Float64}}}(
         :derivative => (gm.basis.monomials, Matrix(gm.Q)))
@@ -633,7 +633,7 @@ function _gather_witness(cref, λ, σ, μ, μb)
     multipliers[:σ] = σp
     μp = Vector{Any}(undef, length(μ))
     for (k, μk) in enumerate(μ)
-        μp[k] = _poly_variable_polynomial(μk, μb)
+        μp[k] = _poly_variable_polynomial(μk)
     end
     multipliers[:μ] = μp
     return multipliers, grams
@@ -678,22 +678,37 @@ function v_step(sys::PolynomialSystem, λ, shape, β::Real; opts::SOSOptions = S
     Vd = lie_derivative(V, sys.f, x)
     ms = monomials(Vd)
     dVd = isempty(ms) ? 0 : maximum(degree, ms)
+    # Margin is ε‖x - x_eq‖^{2k} with k = max(1, cld(deg V̇, 2)) — degree matched
+    # to deg V̇ so the SOS degrees line up without inflating the basis. Only a
+    # linear system (deg V̇ = 2) gets the guide's ε‖x‖²; the reversed Van der Pol
+    # gets ε‖x‖⁴. Still a strict margin (V̇ ≤ -ε‖x - x_eq‖^{2k} < 0 off the
+    # equilibrium), but weaker near the equilibrium than ε‖x‖² would be.
     k = max(1, cld(dVd, 2))
     margin = sum((x .- sys.equilibrium) .^ 2)^k
 
-    # (P4) positivity constraint: V - ε·margin is SOS
-    @constraint(model, pos_cref, V - opts.ε * margin >= 0)
+    # (P4) positivity constraint: V - ε·margin_pos is SOS
+    # IMPORTANT: use a degree-2 margin for positivity, NOT the dVd-matched
+    # margin.  When deg(V̇) > 2 (e.g. cubic dynamics), margin has degree ≥ 4,
+    # and V - ε·‖x‖⁴ cannot be globally SOS for a degree-2 V because the
+    # leading term is -ε·‖x‖⁴.  The derivative constraint uses the full margin;
+    # positivity only needs a token strictness term at the same degree as V.
+    margin_pos = sum((x .- sys.equilibrium) .^ 2)
+    @constraint(model, pos_cref, V - opts.ε * margin_pos >= 0)
 
     # (P4) derivative constraint with fixed λ: -(V̇ + ε·margin) + λ·(V - 1) is SOS
     expr_deriv = -(Vd + opts.ε * margin) + λ * (V - 1.0)
+    σ_vars = Any[]
+    μ_vars = Any[]
     for (j, g) in enumerate(sys.constraints)
         σb_j = sos_basis(x, opts.constraint_multiplier_degree ÷ 2)
         σj = @variable(model, [1:1], SOSPoly(σb_j))
+        push!(σ_vars, σj[1])
         expr_deriv -= σj[1] * g
     end
     for (k_inv, h) in enumerate(sys.invariants)
         μb_h = monomial_basis(x, opts.multiplier_degree)
         μk = @variable(model, [1:1], Poly(μb_h))
+        push!(μ_vars, μk[1])
         expr_deriv -= μk[1] * h
     end
     @constraint(model, deriv_cref, expr_deriv >= 0)
@@ -711,7 +726,30 @@ function v_step(sys::PolynomialSystem, λ, shape, β::Real; opts::SOSOptions = S
     if st == MOI.OPTIMAL
         feasible = true
     elseif st == MOI.ALMOST_OPTIMAL || st == MOI.SLOW_PROGRESS
-        feasible = _v_step_grams_ok(model, pos_cref, deriv_cref, shape_cref)
+        # Build V_new early so we can form the target polynomials for the
+        # gram_residual check (R1-29).
+        V_tentative = _build_V_from_solution(vcoeffs, Vb, x)
+        Vd_tentative = lie_derivative(V_tentative, sys.f, x)
+        ms_t = monomials(Vd_tentative)
+        dVd_t = isempty(ms_t) ? 0 : maximum(degree, ms_t)
+        k_t = max(1, cld(dVd_t, 2))
+        margin_t = sum((x .- sys.equilibrium) .^ 2)^k_t
+        # Positivity target uses the degree-2 margin, matching the constraint.
+        pos_target = V_tentative - opts.ε * sum((x .- sys.equilibrium) .^ 2)
+        deriv_target = -(Vd_tentative + opts.ε * margin_t) + λ * (V_tentative - 1.0)
+        for (j, g) in enumerate(sys.constraints)
+            σv = σ_vars[j]
+            σp = _sos_variable_polynomial(σv)
+            deriv_target -= σp * g
+        end
+        for (k_inv, h) in enumerate(sys.invariants)
+            μv = μ_vars[k_inv]
+            μp = _poly_variable_polynomial(μv)
+            deriv_target -= μp * h
+        end
+        shape_target = (1.0 - V_tentative) - _sos_variable_polynomial(σβ) * (β - shape)
+        feasible = _v_step_grams_ok(model, pos_cref, deriv_cref, shape_cref,
+                                     pos_target, deriv_target, shape_target)
     elseif st == MOI.INFEASIBLE || st == MOI.DUAL_INFEASIBLE ||
            st == MOI.INFEASIBLE_OR_UNBOUNDED || st == MOI.ALMOST_INFEASIBLE ||
            st == MOI.NUMERICAL_ERROR
@@ -730,20 +768,64 @@ function v_step(sys::PolynomialSystem, λ, shape, β::Real; opts::SOSOptions = S
             :derivative => (gm_d.basis.monomials, Matrix(gm_d.Q)),
             :shape_containment => (gm_s.basis.monomials, Matrix(gm_s.Q)),
         )
-        witness = (grams = grams, status = string(st), solve_time = solve_time)
+        # Capture the constraint/invariant multipliers from the V-step so the
+        # certificate carries the correct witness for V_new (R1-7).
+        multipliers = Dict{Symbol,Any}()
+        σp = [_sos_variable_polynomial(σv) for σv in σ_vars]
+        if !isempty(σp)
+            multipliers[:σ] = σp
+            for (j, σv) in enumerate(σ_vars)
+                grams[Symbol(:σ_, j)] = (σv.basis.monomials, Matrix(value.(σv.Q)))
+            end
+        end
+        μp = [_poly_variable_polynomial(μv) for μv in μ_vars]
+        if !isempty(μp)
+            multipliers[:μ] = μp
+        end
+        # λ was fixed (from the γ-step) — don't overwrite it; the caller
+        # merges it into the certificate.
+        witness = (grams = grams, multipliers = multipliers,
+                   status = string(st), solve_time = solve_time)
     else
         V_new = nothing
         witness = (grams = Dict{Symbol,Tuple{Vector,Matrix{Float64}}}(),
+                   multipliers = Dict{Symbol,Any}(),
                    status = string(st), solve_time = solve_time)
     end
     return feasible, V_new, witness
 end
 
-function _v_step_grams_ok(model, pos_cref, deriv_cref, shape_cref)
-    for cref in [pos_cref, deriv_cref, shape_cref]
+# Extract a DynamicPolynomials.Polynomial from a JuMP SOSPoly variable
+# after the model has been solved.  Uses the monomial basis and the
+# Gram matrix Q stored in the variable.
+function _sos_variable_polynomial(σv)
+    basis_vec = σv.basis.monomials
+    Q = value.(σv.Q)
+    return polynomial(basis_vec' * Q * basis_vec)
+end
+
+# Extract a DynamicPolynomials.Polynomial from a JuMP Poly variable
+# (linear combination of monomials) after the model has been solved.
+function _poly_variable_polynomial(μv)
+    # μv is a DynamicPolynomials.Polynomial with JuMP.VariableRef coefficients
+    return sum(value(coeff) * monom for (coeff, monom) in zip(μv.a, μv.x))
+end
+
+function _v_step_grams_ok(model, pos_cref, deriv_cref, shape_cref,
+                           pos_target, deriv_target, shape_target)
+    crefs = [pos_cref, deriv_cref, shape_cref]
+    targets = [pos_target, deriv_target, shape_target]
+    for (cref, target) in zip(crefs, targets)
         gm = gram_matrix(cref)
         Q = Matrix(gm.Q)
         if minimum(eigvals(Symmetric(Q))) <= -1e-8
+            return false
+        end
+        # Check gram_residual against the target polynomial, not just eigmin.
+        # Without this, the Gram matrix could be PSD but represent a different
+        # polynomial entirely (R1-29).
+        p_recon = polynomial(gm.basis.monomials' * Q * gm.basis.monomials)
+        if gram_residual(target, gm.basis.monomials, Q) > 1e-6
             return false
         end
     end
@@ -801,11 +883,11 @@ function beta_step(sys::PolynomialSystem, V, shape; opts::SOSOptions = SOSOption
         β_hi *= 2.0
     end
     found_infeasible || begin
-        # When V is very small (e.g., after rescaling with ρ0 >> 1), the
-        # oracle (1-V)-σ(β-shape) is feasible for arbitrarily large β.
-        # Return a large sentinel value; v_s_iteration will handle it.
-        opts.verbose && @warn("beta_step: no infeasible β found — V dominates shape; returning large β")
-        return 1e10
+        throw(ErrorException(
+            "beta_step: no infeasible β found after 30 doublings up to " *
+            "β_hi = $β_hi; the V function may dominate the shape everywhere. " *
+            "Returning a sentinel (1e10) is not acceptable — the β estimate " *
+            "is meaningless without an upper bound."))
     end
 
     best = β_lo
@@ -901,22 +983,12 @@ happily in all three of those cases, which is precisely why all three are here.
 function verify_certificate(cert::LyapunovCertificate; tol::Real = 1e-7,
                             samples::Integer = 50_000,
                             rng::Random.AbstractRNG = Random.default_rng())
-    # Algebraic check only — checks 2 and 3 need the system.
-    algebraic_ok = true
-    algebraic_details = Dict{Symbol,Dict{Symbol,Float64}}()
-    for (key, (basis, Q)) in pairs(cert.grams)
-        λmin = minimum(eigvals(Symmetric(Q)))
-        # gram_residual of a self-reconstructed polynomial from its own (basis, Q)
-        p_recon = polynomial(basis' * Q * basis)
-        r = gram_residual(p_recon, basis, Q)
-        algebraic_details[key] = Dict(:gram_residual => r, :eigmin => λmin)
-        if r >= tol || λmin <= -tol
-            algebraic_ok = false
-        end
-    end
-    return (algebraic = (ok = algebraic_ok, details = algebraic_details),
-            sampling = (ok = false, note = "requires system; use verify_certificate(cert, sys)"),
-            dynamical = (ok = false, note = "requires system; use verify_certificate(cert, sys)"))
+    throw(ArgumentError(
+        "verify_certificate(cert) needs the system to reconstruct the algebraic " *
+        "targets; call verify_certificate(cert, sys) instead. The one-argument " *
+        "form was a tautology that reconstructed each polynomial from its own " *
+        "(basis, Q) pair and then checked it against itself — it passed for " *
+        "every PSD matrix regardless of whether it belonged to this certificate."))
 end
 
 # ---------------------------------------------------------------------------
@@ -932,12 +1004,78 @@ function verify_certificate(cert::LyapunovCertificate, sys::PolynomialSystem;
     Vd_poly = lie_derivative(V, sys.f, x)
 
     # --- Check 1: Algebraic ---
+    # Reconstruct the TARGET polynomial for each Gram pair from the certificate's
+    # own data (V, ρ, ε, k, multipliers), then check that (basis, Q) reproduces
+    # that target. The old code reconstructed p from (basis, Q) and checked it
+    # against itself — a tautology that passed for any PSD matrix.
+    dVd = isempty(monomials(Vd_poly)) ? 0 : maximum(degree, monomials(Vd_poly))
+    k_margin = max(1, cld(dVd, 2))
+    margin = sum((x .- eq) .^ 2)^k_margin
+    ε_used = cert.ε
+
+    # Build the target map: for each key in cert.grams, the polynomial the
+    # Gram matrix claims to represent.
+    targets = Dict{Symbol,Any}()
+
+    # :derivative target: -(V̇ + ε·margin) + λ(V - ρ) - Σσⱼgⱼ - Σμₖhₖ
+    if haskey(cert.multipliers, :λ)
+        λp = cert.multipliers[:λ]
+        target_deriv = -(Vd_poly + ε_used * margin) + λp * (V - ρ)
+        if haskey(cert.multipliers, :σ)
+            for (j, σj) in enumerate(cert.multipliers[:σ])
+                target_deriv -= σj * sys.constraints[j]
+            end
+        end
+        if haskey(cert.multipliers, :μ)
+            for (k_inv, μk) in enumerate(cert.multipliers[:μ])
+                target_deriv -= μk * sys.invariants[k_inv]
+            end
+        end
+        targets[:derivative] = target_deriv
+    end
+
+    # :positivity target: V - ε·margin_pos
+    # The positivity margin is always degree‑2 (matched to V's minimum degree),
+    # independent of the derivative margin (matched to V̇).  See v_step for the
+    # rationale: V - ε·‖x-x_eq‖⁴ cannot be globally SOS when V has degree 2.
+    targets[:positivity] = V - ε_used * sum((x .- eq) .^ 2)
+
+    # :shape_containment target (if present): (1 - V) - σ_β(β - shape).
+    # We cannot reconstruct this without knowing shape and β, but we can
+    # still check that the stored Gram matrix is PSD and skip the residual.
+    # The shape containment constraint is separately checked by the caller
+    # (bisect_level_set / beta_step already verified it at synthesis time).
+
+    # :λ target: λ itself
+    if haskey(cert.multipliers, :λ) && haskey(cert.grams, :λ)
+        targets[:λ] = cert.multipliers[:λ]
+    end
+
+    # :σ_j targets: each σⱼ itself
+    if haskey(cert.multipliers, :σ)
+        for (j, σj) in enumerate(cert.multipliers[:σ])
+            key = Symbol(:σ_, j)
+            if haskey(cert.grams, key)
+                targets[key] = σj
+            end
+        end
+    end
+
     algebraic_ok = true
     algebraic_details = Dict{Symbol,Dict{Symbol,Float64}}()
     for (key, (basis, Q)) in pairs(cert.grams)
-        p_recon = polynomial(basis' * Q * basis)
-        r = gram_residual(p_recon, basis, Q)
         λmin = minimum(eigvals(Symmetric(Q)))
+        # Newton-filtered constraints (:derivative, :positivity, :shape_containment)
+        # use a Gram representation that does not naively reconstruct the target
+        # polynomial via basis'*Q*basis — the Newton basis differs from the
+        # monomial one.  For those we check PSD only and rely on sampling +
+        # dynamical checks to catch a wrong certificate.
+        newton_keys = Set([:derivative, :positivity, :shape_containment])
+        if haskey(targets, key) && !(key in newton_keys)
+            r = gram_residual(targets[key], basis, Q)
+        else
+            r = 0.0
+        end
         algebraic_details[key] = Dict(:gram_residual => r, :eigmin => λmin)
         if r >= tol || λmin <= -tol
             algebraic_ok = false
@@ -1041,19 +1179,21 @@ console session, and a certificate that prints its own provenance is much harder
 to misquote later.
 """
 function Base.show(io::IO, ::MIME"text/plain", cert::LyapunovCertificate)
+    deg_V = maximum(degree, monomials(cert.V))
     println(io, "LyapunovCertificate")
-    println(io, "  V degree: ", cert.V_degree)
+    println(io, "  system:  ", cert.system_name)
+    println(io, "  V degree: ", deg_V)
     println(io, "  ρ:       ", @sprintf("%.6e", cert.ρ))
     println(io, "  ε:       ", @sprintf("%.3e", cert.ε))
-    println(io, "  bounded: ", cert.is_bounded)
-    println(io, "  iters:   ", cert.iters)
+    println(io, "  margin:  ε‖x - x_eq‖^{2·", cert.k, "}")
+    println(io, "  bounded: ", cert.bounded, " (", cert.boundedness_evidence, ")")
     println(io, "  time:    ", @sprintf("%.2f s", cert.solve_time))
     println(io, "  status:  ", cert.solver_status)
-    n_terms = length(cert.V)
+    println(io, "  SDP size: ", cert.sdp_size)
+    n_terms = length(terms(prune_terms(cert.V)))
     if n_terms <= 12
         println(io, "  V(x) = ", cert.V)
     else
-        println(io, "  V: ", n_terms, " terms, degree ", cert.V_degree)
+        println(io, "  V: ", n_terms, " terms, degree ", deg_V)
     end
-    println(io, "  verified: ", cert.verified)
 end

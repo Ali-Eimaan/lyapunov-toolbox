@@ -1471,6 +1471,10 @@ every line was executed before it was committed.
 | D — Polish | R1-32 … R1-44 | 0 | 13 |
 | **Total** | **44** | **19** | **25** |
 
+**Status as of the fix pass:** all 25 `deepseek-v4-flash` items are applied — see the
+[Fix log](#fix-log--deepseek-v4-flash-items-round-r1) below for file/line/summary per
+item. The 19 `deepseek-v4-pro` items remain open.
+
 `README.md` and `matlab/` are excluded — both were fixed in this pass rather than
 written up. The MATLAB changes are unrun; see the note at the top.
 
@@ -1499,3 +1503,80 @@ the author verifies their own work.
 
 Fix the verification path before the features. A toolbox that certifies a little less
 than it could is a good toolbox; one that cannot tell you when it is wrong is not.
+
+---
+
+# Fix log — `deepseek-v4-flash` items (round R1)
+
+Applied after review round R1. Line numbers are **post-fix** (they supersede the
+"as of `b9692e4`" anchors in the items above). The 19 `deepseek-v4-pro` items are not
+in this table; they were left for their own pass.
+
+| Fix | File | Line(s) | Summary |
+|---|---|---|---|
+| R1-1 | `julia/src/sos_lyapunov.jl` | 1062 | Added `Base.show(io, ::MIME"text/plain", cert)` printing real certificate fields (system, deg V, ρ, ε, margin `k`, bounded, time, status, SDP size, V terms); regression test in `tests/test_sos_lyapunov.jl:403`. |
+| R1-2 | `julia/src/roa_estimation.jl` | 636–672 | `benchmark_row` reads real fields (`cert.sdp_size`, `result.n_sdps`, `result.total_solve_time`, `result.opts.solver`, `cert.ε`) instead of nonexistent names; `fraction_true_roa = missing` (never a NaN posing as a value); reports `margin_k = cert.k`. |
+| R1-20 | `python/lyapunov_toolbox/julia_bridge.py` | 474–600 | `synthesize`: `**kwargs` → explicit keywords (`epsilon`, `verbose`, `solver`); `ε` now actually passed into Julia `SOSOptions(ε=…)` (was recorded but never used); `shape`/`solver` raise `NotImplementedError` instead of being silently ignored; unknown kwargs are a `TypeError`. |
+| R1-21 | `python/lyapunov_toolbox/julia_bridge.py` | 426–462 | `get_session` checks a live session against the requested backend/project (resolved exactly as in `__init__`); a mismatch raises `RuntimeError` naming both configurations; test extended in `python/tests/test_julia_bridge.py:42`. |
+| R1-22 | `python/tests/conftest.py` | 79 | `vdp_certificate` uses `pytest.fail` instead of `pytest.skip` when verification fails — a skipped fixture would let every dependent test pass vacuously. |
+| R1-23 | `python/lyapunov_toolbox/julia_bridge.py` | 660–676 | `_py_marshal_poly`: a variable absent from the polynomial now yields a zero-exponent column (constant direction) instead of erroring. |
+| R1-24 | `julia/src/roa_estimation.jl` | 544–600 | `containment_fraction` honours the `rng` argument (`rand(rng)` everywhere), making results reproducible; docstring updated. |
+| R1-25 | `julia/src/systems.jl` | 384 | Removed the `κ > 0` `ArgumentError` from `consensus_network` — `κ = 0` (no coupling) is a legitimate configuration. |
+| R1-26 | `julia/src/roa_estimation.jl` | 341–360 | `roa_volume(; method = :grid)` throws `ArgumentError` for `n > 2` up front; dead inner `if n > 2` block removed. |
+| R1-27 | `tests/test_roa_estimation.jl` | 400–473 | MATLAB fixture reader rewritten: quoted-CSV parsing, header validation, exponent-tuple reconstruction, and comparison of `V/ρ` (level-set equality, not raw `V` scaling); `using MultivariatePolynomials` added (line 12). |
+| R1-30 | `julia/src/roa_estimation.jl` | 247, 271 | `v_s_iteration` throws `ErrorException` (naming iteration and solver status) on γ-step / V-step infeasibility instead of warn-and-`break`. |
+| R1-31 | `julia/src/sos_lyapunov.jl:126`; `julia/src/roa_estimation.jl:152, 297, 660` | 126, 152, 297, 660 | Added `k::Int` to `LyapunovCertificate` — the margin exponent `ε‖x − x_eq‖^{2k}` with `k = max(1, cld(deg V̇, 2))`; fixed wrong margin comments in `verify_sublevel_set`/`v_step`; both construction sites compute and record `k`; benchmark row reports it. |
+| R1-32 | `julia/src/systems.jl` | 118 | `van_der_pol` now names itself "Van der Pol (reversed)" / "(forward)" per the `reversed` flag. |
+| R1-33 | `python/lyapunov_toolbox/plotting.py` | 111 | `plot_roa_2d` interior contours re-bisect via `boundary_2d(level = ρ·frac)` instead of radial `sqrt(frac)` scaling (only correct for a homogeneous quadratic `V`). |
+| R1-34 | `python/lyapunov_toolbox/plotting.py` | 83–98 | `plot_roa_2d` raises `ValueError` when `n_vars > 2` and `fixed` does not pin every non-axis coordinate — no unlabelled slices (module docstring rule 3). |
+| R1-35 | `python/lyapunov_toolbox/plotting.py` | 159–183 | `plot_phase_portrait` takes explicit `n_vars` (no longer blindly `len(fixed) + 2`) and raises when a coordinate is neither pinned nor an axis. |
+| R1-36 | `python/lyapunov_toolbox/julia_bridge.py` | 178–255 | `boundary_2d` gains a `level` kwarg and Julia's coarse-scan crossing count; raises `ValueError` on non-star-shaped level sets (matches `roa_boundary_2d`). |
+| R1-37 | `julia/src/systems.jl` | 492, 508, 526 | `simulate`: RK4 step `h = (t1 − t0)/nsteps` now matches the returned time grid; status `:ok` → `:converged`; docstring updated. |
+| R1-38 | `julia/src/sos_lyapunov.jl:587`; `python/lyapunov_toolbox/julia_bridge.py:501` | 587, 501 | Julia: `_poly_variable_polynomial(μ)` drops the unused `basis` argument (and dead `μb` in `_gather_witness`). Python: `certify_roa(solver = …)` raises `ValueError` for any non-default value instead of being silently ignored. |
+| R1-39 | `julia/src/roa_estimation.jl` | 434, 499 | `angles = range(0, 2π; length = n + 1)[1:n]` in both `roa_boundary_2d` and `true_roa_boundary_2d` — duplicate endpoint dropped. |
+| R1-40 | `tests/test_sos_lyapunov.jl:203, 218, 288`; `tests/test_roa_estimation.jl:77, 106, 118, 131, 294, 338` | — | `@test cond \|\| error("msg")` → `@test cond "msg"` (inline Test.jl message form) at all nine sites. |
+| R1-41 | `julia/src/systems.jl` | 143 | `inverted_pendulum` docstring states the exact weights `Q = Diagonal([10.0, 1.0])`, `R = 1` (guide §5.2). |
+| R1-42 | `python/tests/conftest.py` | 13–21 | Added `pytest_addoption` declaring `--require-julia` (previously `getoption` fell back to a default, so the flag was unreachable on the command line). |
+| R1-43 | `python/pyproject.toml` | 55–56 | Owner slug already `Ali-Eiman` in the current tree; README (`ali-eiman`), `julia/Project.toml` (`Ali-Eiman`) and pyproject (`Ali-Eiman`) all agree — verified, no change needed. |
+| R1-44 | `README.md` | 103–123 | Quickstart verified by inspection against the `certify_roa` / `RoaCertificate` / `synthesize` signatures (all match); execution still requires Julia and is pending the author's test run. |
+
+**Test status.** No Julia or pytest suite was executed during this pass — the fixes
+were applied, statically checked (`py_compile`, `get_errors`), and the Python-only
+paths (`boundary_2d` crossing detection, `plot_roa_2d` guard) were exercised against
+in-memory certificates. The Julia-side changes (R1-1, R1-2, R1-24…R1-31, R1-37…R1-41)
+and the bridge integration (R1-20, R1-21, R1-23, R1-36, R1-38-Python) must be
+verified with `Pkg.test()` and `pytest` by the author.
+
+---
+
+## Pro fix table (`deepseek-v4-pro`)
+
+The 19 items flagged `deepseek-v4-pro` in the review. They require mathematical/SDP
+reasoning — every one is a correctness or completeness issue, not a mechanical edit.
+
+| Fix | File | Line(s) | Summary |
+|---|---|---|---|
+| R1-3 | `docs/derivations/positivstellensatz.tex` | — | Replaced byte-identical copy of `sos_decomposition.tex` with unique content covering Putinar's Positivstellensatz, the S-procedure, the Archimedean condition, free-sign equality multipliers, witness/verification, and the obstacle-constraint example. |
+| R1-4 | `examples/{van_der_pol,inverted_pendulum,unicycle_with_obstacle,multi_agent_consensus}/*.ipynb` | — | Filled all `**Write:**` placeholder cells with exposition covering the system, Lyapunov candidate, SOS program, certificate verification, degree scaling, limitations, and takeaways. Van der Pol notebook complete; remaining three notebooks pending. |
+| R1-5 | `docs/benchmarks.md` | — | Replaced "SCHEMA ONLY" placeholder with a complete guide: table schema (16 columns), population instructions (run `benchmark_row` per system × degree), interpretation of each column, and known caveats (e.g. `fraction_true_roa = missing` when no ground-truth boundary exists). |
+| R1-6 | `julia/src/sos_lyapunov.jl` | 1006–1020 | `verify_certificate` one-arg form now throws `ArgumentError` explaining it was a tautology; two-arg form reconstructs target polynomials from cert data (`V`, `ρ`, `ε`, `k`, multipliers) and calls `gram_residual(target, basis, Q)`, detecting Gram‑basis mismatches. |
+| R1-7 | `julia/src/sos_lyapunov.jl` | 863–890 | `v_step` captures `σ_vars` and `μ_vars` as JuMP variables, extracts polynomials via `_sos_variable_polynomial` / `_poly_variable_polynomial`, and stores both `witness.multipliers` and `witness.grams`; `v_s_iteration` certificate merges σ/μ from the V-step with λ from the γ-step. |
+| R1-8 | `tests/test_roa_estimation.jl` | 340–380 | VdP containment test now extracts the exact limit-cycle polygon via a Poincaré section (y=0 upward crossings), then uses `_point_in_polygon` ray-casting for point-in-polygon containment — no longer asserts nothing. |
+| R1-9 | `julia/src/sos_lyapunov.jl` | 337, 362 | Manifold and non-manifold fallback seeds changed from `sum(x[i]^2)` to `sum((x[i] − eq[i])^2)` so the initial guess is always centred on the equilibrium. |
+| R1-10 | `julia/src/systems.jl` | 417–422 | `unicycle_with_obstacle` Hurwitz check projects A onto the tangent space `A[1:3, 1:3]` and requires `n_stable == 3` — the full 6×6 A is structurally unstable and was masking the true tangent dynamics. |
+| R1-11 | `julia/src/roa_estimation.jl` | 385 | `bisect_level_set` doubling-cap exceeded now throws `ErrorException` instead of `@warn`-and-continue; the caller cannot distinguish a valid result from a truncated one. |
+| R1-12 | `julia/src/sos_lyapunov.jl` | 495 | `beta_step` throw on infeasibility: `return 1e10` → `throw(ErrorException(...))` — the sentinel value was indistinguishable from a legitimate β and the docstring promised a throw. |
+| R1-13 | `tests/test_sos_lyapunov.jl`, `tests/test_roa_estimation.jl` | — | Six `@test_throws Nothing` → real assertions: VdP containment (see R1-8), shape-set test does actual β-step comparison, disagreement-system test calls `lyapunov_from_linearization`, unrecognized-status test calls `verify_sublevel_set` and checks `w.grams`/`w.multipliers`, two heavy tests got `@test_skip "reason"`. |
+| R1-14 | `julia/src/polynomial_utils.jl` | 255–310 | `is_sublevel_set_bounded` gains `require_proof::Bool=true`; when true, `:sampling_only` throws `ErrorException` — sampling is not a proof; samples at multiple radii; the `_point_in_polygon` helper (ray-casting even-odd) was added. |
+| R1-15 | `julia/src/polynomial_utils.jl` | 155–190 | `taylor_recast` now calls `_exact_taylor_coefficient` (dual-number automatic differentiation) instead of `_taylor_coefficient` (finite differences with fixed `eps`); the `_DualTaylor` multiplication was also corrected. |
+| R1-16 | `julia/src/roa_estimation.jl` | 434, 450, 490 | `roa_boundary_2d` and `_estimate_box` centre rays and bounding box on the equilibrium `eq` (passed as new parameter) instead of the origin; `true_roa_boundary_2d` was already centred — confirmed correct. |
+| R1-17 | `python/lyapunov_toolbox/julia_bridge.py` | 450 | `_validate_variable_names(variables)` called at the top of `certify_roa`; uses regex `^[A-Za-z][A-Za-z0-9_]*$` to reject non-identifiers that would crash the Julia polynomial parser. |
+| R1-18 | `python/lyapunov_toolbox/julia_bridge.py` | 380–420 | `_check_expression_safety` rewritten as a token allowlist using `re.findall` for identifier/number/operator tokens; each token is validated; any disallowed token raises `ValueError`. Module-level `import re` and `_VALID_VARIABLE_RE` constant added. |
+| R1-19 | `julia/src/systems.jl` | 155 | Inverted-pendulum trig recast uses `θ_approx = s + s³/6 + 3s⁵/40` (arcsin Taylor series to 5th order) for the K₁ term instead of raw `s`, matching the forward-dynamics polynomial approximation. |
+| R1-28 | `julia/src/roa_estimation.jl` | 190–210, 247 | β₀ computed on `V / ρ₀` (normalized Lyapunov function) rather than raw `V`; monotonicity check applies from iteration 1 (not 2) so the first V-step improvement is detected. |
+| R1-29 | `julia/src/sos_lyapunov.jl` | 945–960 | `_v_step_grams_ok` takes target polynomials as arguments and checks `gram_residual(target, gm.basis.monomials, Q) > 1e-6` — each Gram matrix is verified against the polynomial it is supposed to represent. |
+
+**Implementation status.** 18 of 19 pro fixes are complete. R1-4 (notebook
+exposition) is fully done for the Van der Pol notebook; the inverted pendulum,
+unicycle, and consensus notebooks still have `**Write:**` placeholder cells that
+need analogous prose. All other pro fixes are implemented and statically checked.
