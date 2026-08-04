@@ -139,6 +139,37 @@ using LyapunovToolbox
             sys = van_der_pol(; reversed = false)  # Forward: origin unstable
             @test_throws ArgumentError lyapunov_from_linearization(sys)
         end
+
+        @testset "invariant systems seed on the tangent space, not the origin" begin
+            # Trig recasts (s² + c² = 1) have a non-origin equilibrium and a
+            # zero eigenvalue in the constrained direction; the old P = I
+            # fallback seeded a ball about the ORIGIN, which is not a Lyapunov
+            # function for the constrained flow and made every invariant system
+            # produce a degenerate certificate.  The seed must vanish at the
+            # equilibrium and be positive on the manifold around it.
+            sys = inverted_pendulum(; recast = :trig)
+            V = lyapunov_from_linearization(sys)
+            x = sys.x
+            eq = sys.equilibrium
+            # Vanishes at the equilibrium.
+            @test abs(V(x => eq)) < 1e-10
+            # Positive on the manifold s² + c² = 1 away from the equilibrium,
+            # and on the tangent-space directions in particular.
+            s_pt = 0.3
+            c_pt = sqrt(1 - s_pt^2)
+            pt = [s_pt, c_pt, 0.0]
+            @test V(x => pt) > 0
+            @test V(x => [0.0, 1.0, 0.3]) > 0
+            # The seed's derivative along the constrained flow is negative near
+            # the equilibrium (it is a local Lyapunov function on the manifold).
+            Vdot = lie_derivative(V, sys.f, x)
+            for _ in 1:200
+                s = 1e-2 * randn()
+                thdot = 1e-2 * randn()
+                c = sqrt(1 - s^2)  # on the manifold, upper branch
+                @test Vdot([s, c, thdot]) < 0
+            end
+        end
     end
 
     @testset "verify_sublevel_set" begin

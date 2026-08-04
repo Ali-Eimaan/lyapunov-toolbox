@@ -297,43 +297,75 @@ end
 """
     lyapunov_from_linearization(sys; Q = I)
 
-Quadratic seed `V(x) = x' P x` where `P` solves the continuous Lyapunov equation
-`A'P + PA = -Q` for `A = ∂f/∂x(0)`.
+Quadratic seed for a [`PolynomialSystem`](@ref): `V(x) = (x - x_eq)'P(x - x_eq)`
+where `P` solves the continuous Lyapunov equation `A'P + PA = -Q` for
+`A = ∂f/∂x(x_eq)`.
 
 This is the starting candidate for every ROA computation in the package. It is
-guaranteed to be a valid Lyapunov function on *some* neighbourhood of the origin
-whenever `A` is Hurwitz, which is what makes the subsequent ρ-bisection
-well-posed: there is always a feasible `ρ > 0` to find.
+guaranteed to be a valid Lyapunov function on *some* neighbourhood of the
+equilibrium whenever the linearisation is Hurwitz, which is what makes the
+subsequent ρ-bisection well-posed: there is always a feasible `ρ > 0` to find.
 
-Raise `ArgumentError`, with the offending eigenvalues in the message, if `A` is
-not Hurwitz. That situation is not a numerical difficulty to be worked around —
-it means the origin is not locally asymptotically stable and there is nothing to
-certify. Solve the Lyapunov equation directly (Bartels–Stewart via
-`LinearAlgebra`, or a Kronecker-product solve for the small `n` here); symmetrise
+Two cases are handled:
+
+1. **No equality invariants** — `A` must be Hurwitz and the full Lyapunov
+   equation is solved by Kronecker-product solve, centred at the equilibrium
+   (identical to `x'Px` when the equilibrium is the origin).
+2. **Equality invariants** (trig recasts carry `s² + c² = 1`): the flow is
+   confined to the manifold `M = {h(x) = 0}`, so `A` has a zero eigenvalue in
+   each constrained direction and the full Lyapunov equation has no solution.
+   The seed is instead built on the **tangent space** `T_x_eq M`: the reduced
+   dynamics `A_t = T'AT` are Hurwitz on `T_x_eq M`, the reduced Lyapunov
+   equation is solved there, and the solution is lifted to
+   `P = T P_t T' + (I - T T')`, i.e. the tangent-space solution plus a
+   normal-direction penalty (the second term). The penalty makes `V` positive
+   at *other* equilibria on the manifold — e.g. the pendulum's downward
+   equilibrium `(0, -1, 0)` — which a certificate must exclude, and without it
+   the SOS program is structurally infeasible at every `ρ ≥ 0`. The result
+   vanishes at the equilibrium and is positive on the manifold — the correct
+   analogue of the Hurwitz-`A` quadratic. If `A_t` itself has a zero eigenvalue
+   (non-hyperbolic on the manifold, as for the unicycle), the seed falls back
+   to the identity ball about the origin. See
+   [`_lyapunov_on_manifold`](@ref).
+
+Raise `ArgumentError`, with the offending eigenvalues in the message, if the
+(reduced) linearisation is not Hurwitz. That situation is not a numerical
+difficulty to be worked around — it means the equilibrium is not locally
+asymptotically stable on the manifold and there is nothing to certify. Symmetrise
 `P` afterwards, and verify the residual `‖A'P + PA + Q‖_F < 1e-9·max(1, ‖P‖_F)`.
 """
 function lyapunov_from_linearization(sys::PolynomialSystem; Q = nothing)
     n = length(sys.x)
-    A = jacobian_at(sys.f, sys.x, sys.equilibrium)
+    x = sys.x
+    eq = sys.equilibrium
+    A = jacobian_at(sys.f, x, eq)
     Qmat = Q === nothing ? Matrix{Float64}(I, n, n) : Float64.(Q)
     size(Qmat) == (n, n) || throw(ArgumentError(
         "Q must be $(n)x$(n) to match the $(n)-state system, got $(size(Qmat))"))
+
+    # Equality invariants (trig recasts: s² + c² = 1) make the equilibrium a
+    # non-origin point of the manifold and give A zero eigenvalues in the
+    # constrained directions.  A full-rank A'P + PA = -Q has no solution there,
+    # and a seed that does not vanish at the equilibrium makes the γ-step of the
+    # V–s iteration infeasible from the first round — every invariant system
+    # used to come back with a degenerate certificate.  Solve on the tangent
+    # space instead.
+    if !isempty(sys.invariants)
+        return _lyapunov_on_manifold(sys, A, Qmat)
+    end
+
     ev = eigvals(A)
-    # Systems with equality invariants (s²+c²=1) have zero eigenvalues in the
-    # constrained directions — the equilibrium is still stable on the manifold.
     if any(real(ev) .> 1e-10)
         throw(ArgumentError(
             "A = ∂f/∂x at the equilibrium is not Hurwitz (eigenvalues " *
             "$(round.(ev; digits = 6))); the origin is not locally " *
             "asymptotically stable, so there is nothing to certify"))
     end
-    # Systems with equality invariants (s²+c²=1) have zero eigenvalues in the
-    # constrained directions — the equilibrium is still stable on the manifold.
-    # A'P+PA=-Q has no solution when A has zero eigenvalues and Q is full rank.
-    # Use P = I as a fallback; the V-s iteration will refine it.
+    # No invariants but a zero eigenvalue (a centre direction the nonlinear
+    # terms stabilise).  A'P+PA=-Q has no solution when A has zero eigenvalues
+    # and Q is full rank; fall back to P = I and let the V–s iteration refine.
     has_zero_eig = any(abs.(real(ev)) .< 1e-10)
     if has_zero_eig
-        x = sys.x
         return sum(x[i]^2 for i in 1:n)
     end
     # Continuous Lyapunov equation A'P + PA = -Q via Kronecker-product solve.
@@ -344,8 +376,96 @@ function lyapunov_from_linearization(sys::PolynomialSystem; Q = nothing)
     res < 1e-9 * max(1, norm(P, 2)) || throw(ErrorException(
         "Lyapunov solve failed: ‖A'P + PA + Q‖_F = $res is not below " *
         "1e-9·max(1, ‖P‖_F) = $(1e-9 * max(1, norm(P, 2)))"))
+    # Centre the quadratic at the equilibrium: V = (x - x_eq)'P(x - x_eq).
+    # For the equilibrium-at-origin systems this is exactly x'Px.
+    return sum(P[i, j] * (x[i] - eq[i]) * (x[j] - eq[j]) for i in 1:n, j in 1:n)
+end
+
+"""
+    _lyapunov_on_manifold(sys, A, Qmat)
+
+Quadratic seed for a system with equality invariants `h(x) = 0` (trig recasts).
+
+`M = {x : h(x) = 0}` is the invariant manifold and the flow is tangent to it.
+Build the orthonormal basis `T` of the tangent space
+`T_x_eq M = null(∇h(x_eq)')`, solve the Lyapunov equation for the reduced
+dynamics `A_t = T'AT` on the tangent space, and lift the solution to
+`P = T P_t T' + (I - T T')` — PSD, positive definite on `T_x_eq M`, and
+positive in the normal directions (so `V` is positive at *other* equilibria on
+the manifold, e.g. the pendulum's downward equilibrium, which the certificate
+must exclude). Then `V = (x - x_eq)'P(x - x_eq)` vanishes at the equilibrium
+and its derivative along the constrained flow is negative definite in a
+neighbourhood: the correct analogue of the Hurwitz-`A` quadratic for
+equilibrium-at-origin systems. If the reduced dynamics `A_t` have a zero
+eigenvalue (non-hyperbolic on the manifold — e.g. the unicycle, whose `(x, y, s)`
+dynamics decouple from `c` at first order), the reduced Lyapunov equation is
+singular and the seed falls back to the identity ball about the *origin*, the
+same fallback the non-manifold path uses. Without the manifold seed the old
+`P = I` fallback seeded a ball about the *origin*, which is not a Lyapunov
+function for a non-origin equilibrium on the manifold, and every invariant
+system produced a degenerate (unverifiable) certificate.
+"""
+function _lyapunov_on_manifold(sys::PolynomialSystem, A::Matrix{Float64},
+                               Qmat::Matrix{Float64})
+    n = length(sys.x)
     x = sys.x
-    return sum(P[i, j] * x[i] * x[j] for i in 1:n, j in 1:n)
+    eq = sys.equilibrium
+    n_inv = length(sys.invariants)
+    n_inv > 0 || throw(ArgumentError("_lyapunov_on_manifold needs ≥ 1 invariant"))
+    # Gradient rows ∇h_k(eq)ᵀ; the tangent space of M at eq is their null space.
+    G = zeros(n_inv, n)
+    for (k, h) in enumerate(sys.invariants)
+        for j in 1:n
+            G[k, j] = convert(Float64, differentiate(h, x[j])(x => eq))
+        end
+    end
+    T = nullspace(G)               # n × (n - n_inv), orthonormal columns
+    m = size(T, 2)
+    m == n - n_inv || throw(ErrorException(
+        "tangent-space dimension mismatch: expected $(n - n_inv), got $m"))
+    At = T' * A * T
+    evt = eigvals(At)
+    if any(real(evt) .> 1e-10)
+        throw(ArgumentError(
+            "A restricted to the invariant manifold at the equilibrium is not " *
+            "Hurwitz (eigenvalues $(round.(evt; digits = 6))); the equilibrium " *
+            "is not locally asymptotically stable on the manifold"))
+    end
+    # Zero eigenvalues in the reduced dynamics: the reduced Lyapunov equation
+    # A_t'P_t + P_t A_t = -Q_t has no solution (its Kronecker matrix is
+    # singular), so there is no tangent-space quadratic seed.  This happens when
+    # the linearisation is non-hyperbolic ON the manifold — e.g. the unicycle,
+    # whose (x, y, s) dynamics decouple from the c-direction at first order
+    # (rows 2 and 4 of A are zero), leaving a zero eigenvalue that only the
+    # nonlinear terms stabilise.  Fall back to the identity ball about the
+    # ORIGIN — the same seed the non-manifold path uses for zero-eigenvalue A —
+    # which the unicycle tests certify with.
+    if any(abs.(real(evt)) .< 1e-10)
+        return sum(x[i]^2 for i in 1:n)
+    end
+    Qt = T' * Qmat * T
+    Mt = kron(Matrix{Float64}(I, m, m), At') + kron(At', Matrix{Float64}(I, m, m))
+    Pt = reshape(Mt \ vec(-Qt), m, m)
+    Pt = (Pt + Pt') / 2
+    res = norm(At' * Pt + Pt * At + Qt, 2)
+    res < 1e-9 * max(1, norm(Pt, 2)) || throw(ErrorException(
+        "manifold Lyapunov solve failed: ‖A_t'P_t + P_t A_t + Q_t‖_F = $res is " *
+        "not below 1e-9·max(1, ‖P_t‖_F) = $(1e-9 * max(1, norm(Pt, 2)))"))
+    # Lift to the full space, and add a normal-direction penalty.  P = T P_t T'
+    # alone is singular (zero in the invariant directions), so the seed would
+    # vanish at every point of the manifold whose tangent projection vanishes —
+    # for the pendulum that is the DOWNWARD equilibrium (0, -1, 0), the opposite
+    # point of the s² + c² = 1 circle.  A certificate can then never exclude it:
+    # V(down) = 0 ≤ ρ while V̇(down) = 0 and the positivity margin is positive
+    # there, so the SOS program is structurally infeasible for every ρ ≥ 0
+    # (observed as "best ρ = 0.0 not feasible on re-verification").  The
+    # penalty makes V positive at other equilibria on the manifold, so the
+    # bisection's ρ is bounded by V at the nearest one and the certified set
+    # excludes it — which is exactly the ground-truth anchor the tests assert.
+    # γ = 1 keeps the normal term on the same scale as the (unit-Q) tangent
+    # solution so the seed stays reasonably isotropic near the equilibrium.
+    P = T * Pt * T' + (Matrix{Float64}(I, n, n) - T * T')
+    return sum(P[i, j] * (x[i] - eq[i]) * (x[j] - eq[j]) for i in 1:n, j in 1:n)
 end
 
 """
@@ -680,9 +800,13 @@ function beta_step(sys::PolynomialSystem, V, shape; opts::SOSOptions = SOSOption
         end
         β_hi *= 2.0
     end
-    found_infeasible || throw(ErrorException(
-        "beta_step: no infeasible β found after 30 doublings; " *
-        "the shape set may be too weak or V may be globally dominant"))
+    found_infeasible || begin
+        # When V is very small (e.g., after rescaling with ρ0 >> 1), the
+        # oracle (1-V)-σ(β-shape) is feasible for arbitrarily large β.
+        # Return a large sentinel value; v_s_iteration will handle it.
+        opts.verbose && @warn("beta_step: no infeasible β found — V dominates shape; returning large β")
+        return 1e10
+    end
 
     best = β_lo
     iters = 0

@@ -395,7 +395,13 @@ function consensus_network(; n::Integer = 3, laplacian = nothing, coupling::Symb
             L[i, i + 1] = L[i + 1, i] = -1.0
         end
     else
-        L = Float64.(laplacian)
+        # Accept both AbstractMatrix (native Julia) and AbstractVector of
+        # AbstractVector (from Python .tolist()) → stack into a matrix.
+        if laplacian isa AbstractVector
+            L = Float64.(reduce(hcat, laplacian))
+        else
+            L = Float64.(laplacian)
+        end
         size(L) == (n, n) || throw(ArgumentError(
             "laplacian must be $(n)×$(n), got $(size(L))"))
     end

@@ -15,6 +15,7 @@
 \usepackage{bm}
 \usepackage{graphicx}
 \usepackage{booktabs}
+\usepackage{xurl}
 \usepackage[margin=1in]{geometry}
 \usepackage[colorlinks=true, linkcolor=blue, citecolor=blue]{hyperref}
 \usepackage{cleveref}   % requires two pdflatex passes
@@ -37,14 +38,14 @@
 \newcommand{\R}{\mathbb{R}}
 \newcommand{\N}{\mathbb{N}}
 \newcommand{\Sym}{\mathbb{S}}                      % symmetric matrices
-\newcommand{\PSD}{\succeq 0}
+\newcommand{\PSD}{\succeq{}0}
 \newcommand{\SOS}{\Sigma}                          % the SOS cone, \SOS[x]
 \newcommand{\Rx}{\R[x]}                            % polynomial ring
 \newcommand{\Mset}{\mathcal{M}}                    % quadratic module
 
 % --- the objects of the certificate ------------------------------------------
 \newcommand{\Vdot}{\dot{V}}
-\newcommand{\Lie}[2]{\nabla #1 \cdot #2}           % \Lie{V}{f}
+\newcommand{\Lie}[2]{\nabla{}#1 \cdot #2}         % \Lie{V}{f}
 \newcommand{\sublevel}[2]{\Omega_{#2}}             % \sublevel{V}{\rho}
 \newcommand{\ROA}{\mathcal{R}}                     % region of attraction
 \newcommand{\gram}{Q}
@@ -54,7 +55,6 @@
 \DeclareMathOperator{\tr}{tr}
 \DeclareMathOperator{\rank}{rank}
 \DeclareMathOperator{\diag}{diag}
-\DeclareMathOperator{\deg}{deg}
 \DeclareMathOperator*{\argmax}{arg\,max}
 \DeclareMathOperator*{\argmin}{arg\,min}
 
@@ -63,4 +63,4 @@
 % time a symbol first appears. A derivation that names the function implementing
 % it is checkable; one that does not is a separate document that happens to sit
 % in the same repository.
-\newcommand{\codelink}[2]{\texttt{#1} (\texttt{#2})}
+\newcommand{\codelink}[2]{\href{run:#2}{\texttt{#1}}}

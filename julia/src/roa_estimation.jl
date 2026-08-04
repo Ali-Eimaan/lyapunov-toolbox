@@ -220,6 +220,9 @@ function v_s_iteration(sys::PolynomialSystem; opts::SOSOptions = SOSOptions(),
     ρ0 = cert0.ρ
     push!(ρ_history, ρ0)
     # β0: find the shape-set level for the initial V.
+    # Computed on the raw (possibly unnormalised) V.  In the first
+    # V-s iteration, V is rescaled to ρ ≡ 1, so β1 may differ from β0.
+    # The monotonicity check below only applies from iteration 2 onward.
     β0 = beta_step(sys, V, shape; opts = opts)
     push!(β_history, β0)
     vol0, _ = roa_volume(V, ρ0, x; method = :montecarlo)
@@ -245,8 +248,9 @@ function v_s_iteration(sys::PolynomialSystem; opts::SOSOptions = SOSOptions(),
         # β-step: find largest β with {shape ≤ β} ⊆ {V_scaled ≤ 1}.
         β_new = beta_step(sys, V_scaled, shape; opts = opts)
 
-        # Monotonicity check.
-        if β_new < β_old - 1e-8
+        # Monotonicity check (iteration 1 is exempt: β0 was computed on the
+        # unnormalised seed V, but V_scaled here is normalised).
+        if iter > 1 && β_new < β_old - 1e-8
             throw(ErrorException(
                 "v_s_iteration: β decreased from $β_old to $β_new at iteration $iter; " *
                 "this violates the monotonicity guarantee and indicates ρ was not " *

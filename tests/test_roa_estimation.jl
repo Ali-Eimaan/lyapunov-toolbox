@@ -146,39 +146,54 @@ using LyapunovToolbox
     end
 
     @testset "inverted pendulum" begin
-        @testset "certified set excludes theta = pi" begin
-            sys = inverted_pendulum()
-            V = lyapunov_from_linearization(sys)
-            result = v_s_iteration(sys; V0 = V, opts = SOSOptions(vs_iterations = 3))
-            cert = result.certificate
-            # The downward equilibrium θ = π, θ̇ = 0 must NOT be in {V ≤ ρ}.
-            x_down = [π, 0.0]
+        @testset "certified set excludes the downward equilibrium" begin
+            # The Taylor model (sin θ ≈ θ - θ³/6) is a DIFFERENT vector field
+            # from the true pendulum: its closed-loop equilibria are only the
+            # origin (the LQR gain is strong enough that the open-loop saddles
+            # at ±√6 leave the real axis), so θ = ±π is not an equilibrium of
+            # the truncated system and V(±π) < ρ says nothing about validity.
+            # The exact model is the trig recast, where the downward
+            # equilibrium (s, c, θ̇) = (0, -1, 0) IS an equilibrium and must be
+            # excluded — the ground-truth anchor from the systems.jl docstring.
+            sys = inverted_pendulum(; recast = :trig)
+            cert = synthesize_lyapunov(sys; opts = SOSOptions(V_degree = 2, vs_iterations = 3))
+            x_down = [0.0, -1.0, 0.0]
             val_at_down = cert.V(cert.x => x_down)
-            # With the Taylor model, θ = π is NOT an equilibrium of the truncated
-            # system (sin(π) ≠ π - π³/6), so the certificate may legitimately
-            # include it. Broken until a trig recast test is used instead.
-            @test_broken val_at_down > cert.ρ ||
-                error("downward equilibrium is inside certified set: V = $val_at_down, ρ = $(cert.ρ)")
+            @test val_at_down > cert.ρ
         end
 
-        @testset "trig recast certifies at least as much as the cubic Taylor model" begin
-            sys_taylor = inverted_pendulum(; recast = :taylor, taylor_order = 3)
+        @testset "trig recast certifies essentially the whole upper manifold" begin
+            # The cubic Taylor truncation (sin θ ≈ θ - θ³/6) is only accurate
+            # near the origin, so its certified level set (θ_max ≈ 3.6 rad) is
+            # an artifact of the model error — it is NOT a claim about the true
+            # pendulum. The trig recast is the exact dynamics restricted to the
+            # manifold s² + c² = 1, so its certified set IS a claim about the
+            # true system. The right metric is therefore the certified at-rest
+            # angle θ_max (largest |θ| with θ̇ = 0 whose point (sin θ, cos θ, 0)
+            # lies in {V ≤ ρ}) — comparing volumes is apples-to-oranges because
+            # the truncated model lives in a different state space.
             sys_trig = inverted_pendulum(; recast = :trig)
-            result_taylor = synthesize_lyapunov(sys_taylor; opts = SOSOptions(V_degree = 2, vs_iterations = 3))
             result_trig = synthesize_lyapunov(sys_trig; opts = SOSOptions(V_degree = 2, vs_iterations = 3))
-            vol_taylor, _ = roa_volume(result_taylor.V,
-                                       result_taylor.ρ,
-                                       sys_taylor.x; method = :grid)
-            vol_trig, _ = roa_volume(result_trig.V,
-                                     result_trig.ρ,
-                                     sys_trig.x; method = :grid)
-            # The trig recast should be at least as good (it's the exact model),
-            # but the P=I fallback gives a weak seed for the 4-state trig system.
-            if vol_trig < vol_taylor * 0.9
-                @test_broken false
-            else
-                @test true
+            x = sys_trig.x
+            lo, hi = 0.0, pi
+            for _ in 1:60
+                mid = (lo + hi) / 2
+                pt = [sin(mid), cos(mid), 0.0]
+                if result_trig.V(x => pt) <= result_trig.ρ
+                    lo = mid
+                else
+                    hi = mid
+                end
             end
+            θ_max = lo
+            # Nearly the whole upper manifold is certified: at-rest angles up
+            # to ~172°. (π itself is the downward equilibrium, excluded — see
+            # the "certified set excludes the downward equilibrium" testset.)
+            @test θ_max > 3.0
+            # ... but not all of it: the downward equilibrium is outside {V ≤ ρ}.
+            @test θ_max < pi
+            # The excluded cap around the downward equilibrium is tiny.
+            @test pi - θ_max < 0.05
         end
 
         @testset "every certified point converges upright under simulation" begin
