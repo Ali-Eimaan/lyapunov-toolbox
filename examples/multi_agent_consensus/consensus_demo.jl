@@ -23,6 +23,7 @@
 
 using LinearAlgebra
 using Printf
+using Statistics
 using Random
 using DelimitedFiles
 using LyapunovToolbox
