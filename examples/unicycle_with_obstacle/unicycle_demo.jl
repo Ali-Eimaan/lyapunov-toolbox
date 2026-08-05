@@ -136,7 +136,7 @@ function main()
             end
         end
         t, X, status = simulate(sys, x0, (0.0, 30.0); dt = 5e-3)
-        final_norm = norm(X[end, :])
+        final_norm = norm(X[end, :] .- sys.equilibrium)
         if final_norm >= 1e-3
             @printf("  Trajectory %d: FAILED to converge (final norm = %.3e)\n", i, final_norm)
             all_ok = false
