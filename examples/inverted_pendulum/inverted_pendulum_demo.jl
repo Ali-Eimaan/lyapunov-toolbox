@@ -60,13 +60,16 @@ function main()
     # -------------------------------------------------- 4. the honest cross-check
     # True dynamics: θ̈ = (g/l)sinθ - (b/(ml²))θ̇ + u/(ml²), u = -K[θ;θ̇]
     # With defaults: m=1, l=1, b=0.1, g=9.81, K from LQR in system construction
+    # The TRUE dynamics are exactly what the trig-recast system encodes -- it is
+    # built with s = sin(theta), c = cos(theta) and no truncation. Evaluating it
+    # at (sin th, cos th, thd) is the exact field, and it avoids re-deriving the
+    # LQR gain here (the toolbox does not expose K; see REVIEW.md).
     function true_rhs(y)
         th, thd = y[1], y[2]
-        g, l, b, m = 9.81, 1.0, 0.1, 1.0
-        K = sys_taylor.notes[:K]
-        u = -K[1]*th - K[2]*thd
-        thdd = (g/l)*sin(th) - (b/(m*l^2))*thd + u/(m*l^2)
-        return [thd, thdd]
+        z = [sin(th), cos(th), thd]
+        fz = [convert(Float64, sys_trig.f[i](sys_trig.x => z)) for i in 1:3]
+        # d(theta)/dt = thd; d(thd)/dt is the third recast component.
+        return [thd, fz[3]]
     end
     function simulate_true(y0, T)
         y = copy(y0)

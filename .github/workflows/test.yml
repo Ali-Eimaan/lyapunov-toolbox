@@ -18,7 +18,20 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        julia-version: ["1.10", "1"]
+        # Only the Julia series the committed Manifest.toml was generated with.
+        #
+        # julia/Manifest.toml is committed deliberately, for reproducibility --
+        # "computed with lyapunov-toolbox at commit abc123" is only checkable if
+        # the dependency set is pinned. But a manifest records stdlib versions
+        # from the Julia that produced it (this one pins LinearAlgebra v1.12.0),
+        # and those do not exist on older releases, so `Pkg.instantiate()` cannot
+        # succeed there. Testing 1.10 against a 1.12-generated manifest failed in
+        # under a minute, every time, for that reason alone.
+        #
+        # To widen this matrix, either regenerate the manifest on the oldest
+        # supported release, or delete it in the older jobs so Pkg re-resolves --
+        # but then those jobs are no longer testing the pinned set.
+        julia-version: ["1"]
         os: [ubuntu-latest]
         include:
           - julia-version: "1"

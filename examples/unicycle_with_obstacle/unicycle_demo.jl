@@ -29,13 +29,13 @@ using LyapunovToolbox
 function main()
     # ------------------------------------------------------------- 1. the system
     sys = unicycle_with_obstacle(obstacle_centre = (1.0, 0.0), obstacle_radius = 0.4)
-    @printf("System: %s, %d states\n", sys.name, sys.n)
-    @printf("State labels: %s\n", join(sys.labels, ", "))
-    J = jacobian_at(sys, zeros(sys.n))
+    @printf("System: %s, %d states\n", sys.name, length(sys.x))
+    @printf("State labels: %s\n", join(sys.state_labels, ", "))
+    J = jacobian_at(sys.f, sys.x, sys.equilibrium)
     @assert all(real(eigvals(J)) .< 0) "Jacobian at goal is not Hurwitz"
     println("  ✓ Jacobian at goal is Hurwitz")
     if haskey(sys.notes, :invariant)
-        println("  Invariant: ", sys.notes[:invariant])
+        println("  Invariant: ", sys.invariants[1])
     end
 
     # ------------------------------------------- 2. unconstrained vs. constrained
@@ -46,7 +46,7 @@ function main()
             cert_unc.ρ, cert_unc.iters, cert_unc.solve_time)
 
     # Constrained: with obstacle as Putinar constraint
-    opts_con = SOSOptions(; V_degree = 4, constraints = [sys.notes[:obstacle_poly]])
+    opts_con = SOSOptions(; V_degree = 4)
     cert_con = synthesize_lyapunov(sys, opts_con)
     @printf("Constrained:       ρ = %.4f, #SDPs = %d, time = %.2fs\n",
             cert_con.ρ, cert_con.iters, cert_con.solve_time)
@@ -58,7 +58,7 @@ function main()
     # By default the system notes contain the invariant polynomial.
     # We already used it implicitly; the free-sign is the default multiplier type.
     # Run with SOS multiplier for comparison
-    opts_sos_inv = SOSOptions(; V_degree = 4, constraints = [sys.notes[:obstacle_poly]],
+    opts_sos_inv = SOSOptions(; V_degree = 4,
                               invariant_multiplier = :sos)
     cert_sos_inv = synthesize_lyapunov(sys, opts_sos_inv)
     @printf("Invariant μ=SOS:   ρ = %.4f\n", cert_sos_inv.ρ)
@@ -81,7 +81,7 @@ function main()
         state = [x, y, s, c]
         if cert_con.V(state) <= cert_con.ρ
             count_on_manifold += 1
-            g_val = sys.notes[:obstacle_poly](sys.x => state)
+            g_val = sys.constraints[1](sys.x => state)
             g_val_f = convert(Float64, g_val)
             min_g = min(min_g, g_val_f)
             if g_val_f < clearance
@@ -130,7 +130,7 @@ function main()
         end
         # Check obstacle
         for k in 1:size(X, 1)
-            g_val = convert(Float64, sys.notes[:obstacle_poly](sys.x => X[k, :]))
+            g_val = convert(Float64, sys.constraints[1](sys.x => X[k, :]))
             if g_val < -1e-8
                 @printf("  Trajectory %d: ENTERED OBSTACLE at step %d (g = %.3e)\n", i, k, g_val)
                 all_ok = false

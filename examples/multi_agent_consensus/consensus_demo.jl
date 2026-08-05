@@ -45,12 +45,18 @@ function main()
 
     # ------------------------------------------- 2. disagreement coordinates
     sys = consensus_network(n = 3, coupling = :cubic, κ = 1.0)
-    U = sys.notes[:U]
+    # Recompute the disagreement basis. consensus_network builds U the same way
+    # but only records it in `notes` as prose -- there is no programmatic
+    # accessor, which is an API gap logged in REVIEW.md. Recomputing here keeps
+    # the example runnable; it must stay in step with systems.jl.
+    n_agents = 3
+    Qm = Matrix(qr([ones(n_agents) Matrix{Float64}(I, n_agents, n_agents)]).Q)
+    U = Qm[:, 2:n_agents]
     @printf("U (orthonormal basis of 𝟙^⊥): %dx%d\n", size(U, 1), size(U, 2))
     @assert norm(U' * ones_vec) < 1e-12 "U'𝟙 should be zero"
     @assert norm(U' * U - I) < 1e-12 "U should be orthonormal"
     println("  ✓ U'𝟙 = 0, U'U = I")
-    Jz = jacobian_at(sys, zeros(sys.n))
+    Jz = jacobian_at(sys.f, sys.x, sys.equilibrium)
     @assert all(real(eigvals(Jz)) .< 0) "Jacobian in z is not Hurwitz"
     println("  ✓ Jacobian in disagreement coords is Hurwitz")
 

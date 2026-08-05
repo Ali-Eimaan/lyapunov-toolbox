@@ -21,8 +21,8 @@ function main()
     # ---------------------------------------------------------------- 1. system
     sys = van_der_pol(μ = 1.0)
     @printf("System: %s\n", sys.name)
-    @printf("State labels: %s\n", join(sys.labels, ", "))
-    J = jacobian_at(sys, zeros(sys.n))
+    @printf("State labels: %s\n", join(sys.state_labels, ", "))
+    J = jacobian_at(sys.f, sys.x, sys.equilibrium)
     @printf("Jacobian at origin:\n")
     display(J)
     @assert all(real(eigvals(J)) .< 0) "Jacobian at origin is not Hurwitz"
