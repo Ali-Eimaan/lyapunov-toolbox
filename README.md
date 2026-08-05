@@ -7,14 +7,20 @@ Julia (SumOfSquares.jl), Python (bridge + plotting), and MATLAB (YALMIP+Mosek).
 [![Julia](https://img.shields.io/badge/julia-%3E%3D1.10-blue)](https://julialang.org)
 [![Licence](https://img.shields.io/badge/licence-BSD--3--Clause-green)](LICENSE)
 
-> **Status: pre-release.** All six benchmark configurations now synthesise and
-> verify (algebraic + sampling + dynamical checks), and the obstacle-free claim is
-> backed by an explicit containment constraint rather than asserted. Still open
-> before a tagged release, tracked in [REVIEW.md](REVIEW.md): `docs/benchmarks.md`
-> and the Results table below are unfilled, the notebooks have not been executed
-> with outputs, the MATLAB cross-validation fixture has not been generated, and
-> two tests have stale expectations. Numeric results are deliberately absent here
-> rather than quoted from an unverified run.
+> **Status: release candidate.** All six benchmark configurations synthesise and
+> verify (algebraic Gram-residual check against the reconstructed target, plus
+> pointwise `V̇` sampling and forward simulation). Both suites are green — Julia
+> 14411 passed / 0 failed, Python 28 passed / 0 skipped, `ruff` clean — all four
+> notebooks execute with committed outputs, and the Julia and MATLAB
+> implementations agree on the Van der Pol Lyapunov function to **2.2e-16**.
+>
+> Known gaps, tracked in [REVIEW.md](REVIEW.md): `v_step` does not return its
+> containment Gram matrix, so on the `synthesize_lyapunov` path obstacle
+> containment is enforced and empirically confirmed but not witness-checked (it
+> *is* witness-checked via `estimate_roa`); `ROAResult.n_sdps` and
+> `total_solve_time` count only the V–s loop and omit the preceding bisection, so
+> those columns are left out of `docs/benchmarks.md` rather than published wrong.
+> Every section of `docs/benchmarks.md` is now filled from a measured run.
 
 <table>
 <tr>

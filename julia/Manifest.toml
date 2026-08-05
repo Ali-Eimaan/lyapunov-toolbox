@@ -2,7 +2,7 @@
 
 julia_version = "1.12.6"
 manifest_format = "2.0"
-project_hash = "8d581d46520277d76adf8a0f4b3d43e32dce2cae"
+project_hash = "dea71c5e936b33e216de943a762cbf508d7b4e30"
 
 [[deps.AMD]]
 deps = ["LinearAlgebra", "SparseArrays", "SuiteSparse_jll"]
@@ -299,6 +299,12 @@ deps = ["StyledStrings"]
 uuid = "ac6e5ff7-fb65-4e79-a425-ec3bc9c03011"
 version = "1.12.0"
 
+[[deps.LLVMOpenMP_jll]]
+deps = ["Artifacts", "JLLWrappers", "Libdl"]
+git-tree-sha1 = "b7970cef8ae1c990ba0c09cd8bdc1145e006632f"
+uuid = "1d63c593-3942-5779-bab2-d838dc0a180e"
+version = "22.1.7+0"
+
 [[deps.LRUCache]]
 git-tree-sha1 = "5519b95a490ff5fe629c4a7aa3b3dfc9160498b3"
 uuid = "8ac3fa9e-de4c-5943-b1dc-09c6b5f20637"
@@ -447,6 +453,12 @@ version = "1.1.4"
 uuid = "ca575930-c2e3-43a9-ace4-1e988b2c1908"
 version = "1.3.0"
 
+[[deps.OpenBLAS32_jll]]
+deps = ["Artifacts", "CompilerSupportLibraries_jll", "JLLWrappers", "Libdl", "libblastrampoline_jll"]
+git-tree-sha1 = "30870d0f2dc0b2dba76b10df1c58c7f018413e56"
+uuid = "656ef2d0-ae68-5445-9ca0-591084a874a2"
+version = "0.3.34+0"
+
 [[deps.OpenBLASConsistentFPCSR_jll]]
 deps = ["Artifacts", "CompilerSupportLibraries_jll", "JLLWrappers", "Libdl"]
 git-tree-sha1 = "38a93f17e431141c6470bb67a88952a7c4f0e928"
@@ -580,6 +592,26 @@ deps = ["LinearAlgebra"]
 git-tree-sha1 = "f479526c4f6efcbf01e7a8f4223d62cfe801c974"
 uuid = "af85af4c-bcd5-5d23-b03a-a909639aa875"
 version = "0.2.1"
+
+[[deps.SCS]]
+deps = ["LinearAlgebra", "MathOptInterface", "OpenBLAS32_jll", "PrecompileTools", "SCS_jll", "SparseArrays"]
+git-tree-sha1 = "2c62bab6468c6d8ec6e1fac4a203a80d5a0dfc67"
+uuid = "c946c3f1-0d1f-5ce8-9dea-7daa1f7e2d13"
+version = "2.6.4"
+
+    [deps.SCS.extensions]
+    SCSSCS_GPU_jllExt = ["SCS_GPU_jll"]
+    SCSSCS_MKL_jllExt = ["SCS_MKL_jll"]
+
+    [deps.SCS.weakdeps]
+    SCS_GPU_jll = "af6e375f-46ec-5fa0-b791-491b0dfa44a4"
+    SCS_MKL_jll = "3f2553a9-4106-52be-b7dd-865123654657"
+
+[[deps.SCS_jll]]
+deps = ["Artifacts", "CompilerSupportLibraries_jll", "JLLWrappers", "LLVMOpenMP_jll", "Libdl", "libblastrampoline_jll"]
+git-tree-sha1 = "f7864fb125fc5eb61fa2f2c5738623be0b986edd"
+uuid = "f4f2fc5b-1d94-523c-97ea-2ab488bedf4b"
+version = "300.200.1100+0"
 
 [[deps.SHA]]
 uuid = "ea8e919c-243c-51af-8825-aaa63cd721ce"

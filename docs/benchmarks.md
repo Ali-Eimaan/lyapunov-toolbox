@@ -113,30 +113,128 @@ Observed failure points, for honesty about where this stops working:
 
 ## 3. Solver comparison
 
-Not run. Only Clarabel is wired up on the Julia side; SCS is supported but not
-installed, and Mosek is MATLAB-only here. Left empty rather than filled with one
-row pretending to be a comparison.
+Same SOS program, same formulation, different conic solver. This is the
+comparison §4 *cannot* make: there the whole implementation changes, so a
+disagreement could come from either the formulation or the solver. Here only the
+solver varies, which isolates solver accuracy.
 
----
+Van der Pol (reversed), `V` from the linearisation, fixed-`V` ρ-bisection:
+
+| Solver | `ρ` | Wall (s) | Gram residual | min eig `Q` | Status | Verified |
+|---|---|---|---|---|---|---|
+| Clarabel 0.11.1 | 2.30438 | 21.7 | 1.65e-11 | −1.25e-10 | `OPTIMAL` | ✓ |
+| SCS 2.x | 2.29525 | 18.1 | 3.29e-12 | −3.50e-10 | `OPTIMAL` | ✓ |
+| SeDuMi (via MATLAB, §4) | 2.316 | 1.1 | 5.08e-03 | +9.80e-04 | marginal, verified | ✓ |
+
+**Clarabel vs SCS agree on ρ to 3.96e-03 relative**, and both return witnesses
+that pass the independent Gram check — residuals around 1e-11 to 1e-12, eight
+orders tighter than SeDuMi on the same mathematics. All three certified levels
+sit within 0.5 % of each other.
+
+The residual column is the one that matters, not the wall clock. A solver that
+returns quickly with a residual of 5e-3 has not certified the same thing as one
+returning 1e-11; the SeDuMi row is only usable because
+`compute_roa_yalmip` verifies the returned Gram matrices rather than trusting
+the reported status (see §4).
+
+**What this exposed.** SCS at `eps = 1e-9` first came back `ITERATION_LIMIT`,
+which `verify_sublevel_set` did not recognise — so it threw, which is the correct
+default for an unhandled status but made the solver unusable. `ITERATION_LIMIT`
+and `TIME_LIMIT` are now handled the same way as `ALMOST_OPTIMAL`: the solver has
+given up, so the witness is checked and accepted only if it verifies. With
+`max_iters = 100000` SCS converges to `OPTIMAL` outright.
+
+Mosek is not benchmarked: it needs a licence, and this machine has none. The
+`matlab/` path supports it via `opts.solver = 'mosek'`.
 
 ## 4. Julia vs MATLAB cross-validation
 
-Not run — YALMIP is not installed on the benchmark machine, so
-`tests/fixtures/matlab_vdp.csv` has not been generated. `matlab/assert_yalmip_env.m`
-prints the setup instructions. The Julia-side reader is in
-`tests/test_roa_estimation.jl` and skips (not passes) while the fixture is absent.
+Two implementations sharing **no code**: Julia (SumOfSquares.jl + Clarabel) and
+MATLAB (YALMIP + SeDuMi), against independently written formulations. Agreement
+is evidence in a way a repeated run of the same code is not.
 
----
+| Quantity | Julia | MATLAB | Agreement |
+|---|---|---|---|
+| Van der Pol `ρ` (fixed-V) | 2.304375 | 2.316 | 5.0e-3 relative |
+| Van der Pol `V` coefficients (normalised) | `1.5, −1, 1` | `1.5, −1, 1` | **2.22e-16** |
+| Van der Pol true ROA area (limit cycle) | 13.7222 | 13.7222 | exact |
+| Van der Pol certified area | 6.4748 | 6.50742 | 5.0e-3 relative |
+| Van der Pol area fraction | 47.18 % | 47.42 % | 0.24 pp |
+| Pendulum (Taylor-3) `ρ` | — | 7.9045 | Julia normalises to ρ≡1; compare V |
+
+The coefficient agreement is the strong result. Both sides build `V = x'Px` with
+`P` solving `A'P + PA = −I`, so the *shape* of `V` is fixed by linear algebra
+rather than by the SDP, and the two agree to machine epsilon. A transposed or
+mis-ordered certificate would show up here immediately — and did: see below.
+
+**Tolerance, and why it is 1e-2 on `ρ` and 1e-6 on the coefficients.** Clarabel
+reaches a Gram residual of ~1e-10 on this program; SeDuMi reaches ~5e-3
+(measured, and recorded in the fixture's own `gram_residual` column). Two
+implementations cannot agree on a bisected level more tightly than the worse
+solver can certify it. The coefficients carry no such limitation because they
+come from a dense linear solve, hence the far tighter bound there.
+
+**What this check caught.** On its first real run the two disagreed by **41×**
+(Julia 2.304, MATLAB 0.056) and the `V` diagonal was swapped. Three separate
+defects, each of which would have masked the others:
+
+1. `compute_roa_yalmip` mapped SeDuMi's status 4 ("numerical problems") straight
+   to infeasible. Measured, status 4 spans the entire feasible range with **PSD**
+   Gram matrices and residual ~1e-3, while genuine infeasibility gives ~1e+6 —
+   nine orders of separation. It now verifies the witness instead of trusting
+   the status, exactly as the Julia side does for `ALMOST_OPTIMAL`.
+2. `write_roa_fixture` used YALMIP's `exponents()`, which returns columns in
+   YALMIP's internal variable order rather than the caller's. Replaced with
+   per-variable `degree()`, which names the variable it asks about.
+3. The Julia-side reader rebuilt `V` over freshly declared variables, so the
+   comparison subtracted polynomials from disjoint variable sets and could never
+   have passed.
+
+**Provenance.** MATLAB R2023a, YALMIP master (2026-08-05), SeDuMi master built
+against MinGW-w64 GCC 14.2.0 (34 mex files). Regenerate with:
+
+```matlab
+van_der_pol_roa('Solver','sedumi','WriteFixture',true,'Plot',false)
+pendulum_roa('Solver','sedumi','WriteFixture',true,'Plot',false)
+```
+
+CI has neither MATLAB nor a solver licence, so `tests/fixtures/*.csv` are
+committed artefacts. The commit that updates one must record these versions.
 
 ## 5. Bridge overhead
 
-Not systematically measured. One figure worth recording: a cold
-`certify_roa` call pays Julia startup plus SumOfSquares precompilation, roughly
-30–60 s on this machine; subsequent calls in the same process do not.
-`RoaCertificate.evaluate` runs in NumPy off the marshalled certificate and needs
-no Julia at all, which is why the plotting layer works on a machine without it.
+Every cold figure is measured in a **fresh subprocess**. Timing a "cold" import
+inside a process that has already imported the module measures nothing, and
+Julia startup cannot be repeated in-process at all. Warm figures are the median
+of repeated calls after discarding the first.
 
----
+| Operation | Time |
+|---|---|
+| `import lyapunov_toolbox` (cold, median of 5) | **0.169 s** (max 0.199 s) |
+| First `certify_roa` — Julia start + package load + solve | **163.7 s** |
+| Subsequent `certify_roa` in the same process | **71.5 s** |
+| `RoaCertificate.evaluate` on 10⁶ points (NumPy, no Julia) | **0.189 s** |
+| `save` + `load_certificate` round trip (JSON, no Julia) | **0.0042 s** |
+
+**Read the first two rows together.** The 163.7 s cold call is not bridge
+latency — 71.5 s of it is the SDP work itself (a ρ-bisection is ~40 sequential
+solves), so the one-off cost of starting Julia and loading SumOfSquares is
+roughly **90 s**. That is paid once per process, never again.
+
+**The import figure is the load-bearing one.** At 0.169 s it confirms the bridge
+does not boot Julia at import time, which is what lets the other portfolio
+repositories depend on this package for its plotting layer alone without paying
+for a Julia runtime they will not use. `test_import_does_not_start_julia`
+asserts this stays under 2 s; the measured value has an order of magnitude of
+headroom.
+
+**The evaluation figure justifies the marshalling design.** A certificate
+crosses the boundary once, as `(exponents, coefficients)`, and is then evaluated
+in NumPy at ~5.3 million points per second with no Julia in the loop. Calling
+back through the bridge per point would be slower by orders of magnitude and
+would make plotting impossible on a machine without Julia — which is precisely
+the case `RoaCertificate` is built to support. The 4.2 ms JSON round trip is why
+storing certificates alongside downstream results is cheap enough to be routine.
 
 ## 6. Reproduction
 

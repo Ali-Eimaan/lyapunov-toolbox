@@ -73,7 +73,12 @@ results.config = config;
 %    is unavoidable across the language boundary and is exactly what the
 %    cross-validation fixture guards. Change one, change both in the same
 %    commit, and re-run this script.
-sdpvar x1 x2;
+% Explicit assignment, not command syntax -- see the note in pendulum_roa.m:
+% command-syntax sdpvar creates names at run time, but MATLAB binds
+% variable-vs-function at parse time, so any name shadowing a toolbox function
+% is parsed as a call. x1/x2 happen to be safe today; this does not rely on it.
+x1 = sdpvar(1, 1);
+x2 = sdpvar(1, 1);
 x = [x1; x2];
 f = [-x2; x1 + mu*(x1^2 - 1)*x2];
 

@@ -302,10 +302,29 @@ function v_s_iteration(sys::PolynomialSystem; opts::SOSOptions = SOSOptions(),
         total_sdps += 1
         total_time += w_γ.solve_time
         if !feasible_γ
-            throw(ErrorException(
-                "v_s_iteration: γ-step (multiplier_step) infeasible at iteration $iter " *
-                "with solver status $(w_γ.status); feasibility is preserved by the " *
-                "iteration and an infeasible γ-step means the SDP failed to solve."))
+            # Same split as the V-step below. A hard INFEASIBLE is a bug: the
+            # seed was certified at ρ by bisect_level_set, and {V/ρ ≤ 1} is the
+            # same set, so the program cannot be empty.
+            if w_γ.status == "INFEASIBLE" || w_γ.status == "DUAL_INFEASIBLE" ||
+               w_γ.status == "INFEASIBLE_OR_UNBOUNDED"
+                throw(ErrorException(
+                    "v_s_iteration: γ-step (multiplier_step) reported $(w_γ.status) at " *
+                    "iteration $iter. {V/ρ ≤ 1} is the set bisect_level_set already " *
+                    "certified, so an empty search space is a formulation bug — check " *
+                    "the margin rescaling and the multiplier degree."))
+            end
+            # A MARGINAL solve that fails the Gram check is not a bug. It is the
+            # solver unable to certify this particular (V, ρ) to PSD accuracy,
+            # which happens when the seed is only just feasible — e.g. sweeping
+            # ε, where the bisection and the γ-step no longer share a margin, so
+            # the "previous iterate is feasible" argument does not apply.
+            #
+            # Keep the fixed-V certificate we already hold; it is verified.
+            refinement_stalled = true
+            opts.verbose && @warn(
+                "v_s_iteration: γ-step did not verify at iteration $iter " *
+                "(status $(w_γ.status)); keeping the fixed-V certificate.")
+            break
         end
 
         # β-step: find largest β with {shape ≤ β} ⊆ {V_scaled ≤ 1}.
@@ -700,6 +719,27 @@ function true_roa_boundary_2d(sys::PolynomialSystem; xlim, ylim, n::Integer = 20
 end
 
 """
+    _polygon_area(pts)
+
+Shoelace area of a closed polygon given as a vector of `(x, y)` tuples.
+
+Assumes the polygon is SIMPLE. A self-overlapping vertex list — e.g. a limit
+cycle trace spanning several periods — makes the signed loop contributions
+cancel rather than add, and the result is silently meaningless. Extract exactly
+one period before calling this.
+"""
+function _polygon_area(pts)
+    n = length(pts)
+    n >= 3 || return 0.0
+    a = 0.0
+    for i in 1:n
+        j = i == n ? 1 : i + 1
+        a += pts[i][1] * pts[j][2] - pts[j][1] * pts[i][2]
+    end
+    return abs(a) / 2
+end
+
+"""
     containment_fraction(V, ρ, x, boundary_points; rng = Random.default_rng())
 
 Fraction of the area enclosed by `boundary_points` (the true ROA estimate) that
@@ -713,17 +753,8 @@ volume improvement matters. Report both, always, in that order.
 """
 function containment_fraction(V, ρ::Real, x::AbstractVector, boundary_points;
                               rng::Random.AbstractRNG = Random.default_rng())
-    # Polygon area by shoelace formula.
     n_pts = length(boundary_points)
-    function poly_area(pts)
-        a = 0.0
-        for i in 1:n_pts
-            j = i == n_pts ? 1 : i + 1
-            a += pts[i][1] * pts[j][2] - pts[j][1] * pts[i][2]
-        end
-        return abs(a) / 2
-    end
-    true_area = poly_area(boundary_points)
+    true_area = _polygon_area(boundary_points)
     true_area <= 0 && return (NaN, NaN)
 
     # Fraction of true ROA inside {V ≤ ρ}.

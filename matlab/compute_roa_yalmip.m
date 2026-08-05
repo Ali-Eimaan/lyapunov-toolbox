@@ -300,7 +300,19 @@ for j = 1:nCon
 end
 F = [F, sos(expr)];
 
+% Bound the multiplier coefficients.
+%
+% SOLVESOS with an empty objective is a pure feasibility problem, but the
+% multiplier coefficients are otherwise free, and SeDuMi reports
+% "Unbounded objective function" (YALMIP status 2) when it finds a ray in a
+% direction the constraints do not pin down. Status 2 is genuinely ambiguous
+% for a feasibility problem -- it says nothing about whether an SOS
+% decomposition exists -- so rather than guess at its meaning, remove the
+% unboundedness: a box on the coefficients keeps the feasible set intact for
+% any certificate of practical magnitude while making the problem bounded.
 decisionVars = [cl; vertcat(cs{:})];
+coeffBound = 1e6;
+F = [F, -coeffBound <= decisionVars <= coeffBound];
 [diagnostics, ~, gramQ, gramRes] = solvesos(F, [], settings, decisionVars);
 solTime = diagnostics.solvertime;
 
@@ -311,13 +323,52 @@ switch diagnostics.problem
     case 1
         feasible  = false;
         statusStr = 'infeasible';
-    case 4
-        % "Numerical problems". Treated as INFEASIBLE deliberately: accepting a
-        % marginal solve inflates rho, and an over-estimate of a certified ROA
-        % is a false certificate. This is the one direction of error this
-        % routine must never make.
+    case 2
+        % "Unbounded objective function". With the coefficients boxed above,
+        % this is what SeDuMi reports when the SOS constraint itself cannot be
+        % met -- the measured residual jumps to ~1e+6. Treat as infeasible.
         feasible  = false;
-        statusStr = 'numerical_problems';
+        statusStr = 'unbounded_infeasible';
+    case 4
+        % "Numerical problems" from SeDuMi. Do NOT guess at what this means --
+        % VERIFY THE WITNESS, exactly as the Julia side does for
+        % ALMOST_OPTIMAL: the Gram matrices must reproduce their target
+        % polynomial and be PSD.
+        %
+        % Measured on the Van der Pol reference (SeDuMi, degree-2 lambda):
+        %
+        %   rho     problem  maxResidual  minEigQ
+        %   2.000   4        2.43e-03     +5.80e-04     <- feasible
+        %   2.304   4        6.49e-03     +2.02e-03     <- feasible (the boundary)
+        %   2.400   2        3.40e+06      0            <- infeasible
+        %
+        % Nine orders of magnitude separate the two, so the threshold is not
+        % delicate. It is far looser than the Julia side's 1e-7 because SeDuMi
+        % is markedly less accurate than Clarabel on the same program -- that
+        % is a property of the solver, and the cross-validation tolerance on
+        % rho (1e-3 relative) is what actually guards the comparison.
+        %
+        % Treating status 4 as infeasible outright, which is what this did
+        % before, made the bisection stop at rho = 0.056 against Julia's 2.304
+        % -- a 41x disagreement that looked like a formulation bug and was
+        % really an unverified status mapping.
+        if isempty(gramQ)
+            feasible  = false;
+            statusStr = 'numerical_problems_no_witness';
+        else
+            minEigQ = inf;
+            for kQ = 1:numel(gramQ)
+                Qs = (gramQ{kQ} + gramQ{kQ}') / 2;
+                minEigQ = min(minEigQ, min(eig(Qs)));
+            end
+            if max(abs(gramRes)) < 1e-2 && minEigQ > -1e-6
+                feasible  = true;
+                statusStr = 'feasible_marginal_verified';
+            else
+                feasible  = false;
+                statusStr = 'numerical_problems';
+            end
+        end
     otherwise
         error('lyapunovToolbox:solverError', ...
               'Solver failed with status %d: %s', ...

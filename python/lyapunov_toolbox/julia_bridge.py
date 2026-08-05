@@ -373,7 +373,7 @@ class JuliaSession:
         # julia_available() swallowed the exception so every integration test
         # skipped instead of failing.
         jl_main.seval("using Pkg")
-        jl_main.Pkg.activate(str(self._project))
+        jl_main.Pkg.activate(self._project.as_posix())
         return juliacall
 
     def _start_pyjulia(self) -> Any:
@@ -388,9 +388,13 @@ class JuliaSession:
         try:
             jl = julia.Julia(compiled_modules=False)
             from julia import Main as _main
-            # Path as a value, not interpolated source — see _start_juliacall.
-            _main.eval("using Pkg")
-            _main.Pkg.activate(str(self._project))
+            # PyJulia has no usable attribute access for modules: `_main.Pkg`
+            # goes through julia.isdefined(), which rejects a name containing no
+            # dot. So the path must go through eval() as source after all — use
+            # as_posix() so it contains no backslashes at all. Julia accepts
+            # forward slashes on Windows, which sidesteps the unicode-escape
+            # parse error that made the juliacall path unstartable here.
+            _main.eval(f'using Pkg; Pkg.activate("{self._project.as_posix()}")')
             return jl
         except Exception as exc:
             raise JuliaBackendError(
@@ -591,6 +595,7 @@ def synthesize(
     vs_iterations: int = 10,
     epsilon: float = 1e-6,
     shape: str | None = None,
+    rho_hi: float | None = None,
     verbose: bool = False,
     solver: str | None = None,
 ) -> tuple[RoaCertificate, dict[str, Any]]:
@@ -626,6 +631,12 @@ def synthesize(
             f"Unknown system '{system}'. Available: {list(system_map.keys())}"
         )
 
+    # ρ_hi is REQUIRED for a globally stable system: the consensus network with
+    # κ > 0 has no finite ROA boundary, so bisect_level_set correctly refuses to
+    # invent one and throws. Without exposing this, the Python bridge could not
+    # run that system at all — which is exactly how the consensus notebook died.
+    rho_hi_arg = "" if rho_hi is None else f", ρ_hi = {float(rho_hi)}"
+
     code = f"""
     sys = {system_map[system]}
     opts = LyapunovToolbox.SOSOptions(V_degree = {V_degree},
@@ -633,7 +644,7 @@ def synthesize(
                                        vs_iterations = {vs_iterations},
                                        ε = {epsilon},
                                        verbose = {'true' if verbose else 'false'})
-    result = LyapunovToolbox.v_s_iteration(sys; opts = opts)
+    result = LyapunovToolbox.v_s_iteration(sys; opts = opts{rho_hi_arg})
     vc = LyapunovToolbox.verify_certificate(result.certificate, sys)
     (result.certificate, result,
      vc.algebraic.ok && vc.sampling.ok && vc.dynamical.ok)

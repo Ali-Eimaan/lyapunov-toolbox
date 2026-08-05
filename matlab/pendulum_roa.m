@@ -96,7 +96,20 @@ end
 results.K = K;
 
 % 4. Closed-loop polynomial field with the Taylor recast.
-sdpvar th thd;
+% Declare with EXPLICIT ASSIGNMENT, not command syntax.
+%
+% `sdpvar th thd` creates the variables at run time, but MATLAB decides
+% variable-vs-function at PARSE time. `thd` is a Signal Processing Toolbox
+% function (total harmonic distortion, toolbox/signal/signal/thd.m), so every
+% later `thd` was parsed as a call to it and the script died with
+% "MATLAB:narginchk:notEnoughInputs" pointing into thd.m line 68 -- a stack
+% frame with no obvious connection to this file. `th` happened to work only
+% because no function of that name exists.
+%
+% Assigning with `=` classifies the name as a variable at parse time, which is
+% robust no matter which toolboxes happen to be installed.
+th  = sdpvar(1, 1);
+thd = sdpvar(1, 1);
 x = [th; thd];
 sinApprox = taylor_sin(th, tOrder);
 u = -K*x;

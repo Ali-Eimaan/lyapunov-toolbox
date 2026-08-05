@@ -40,7 +40,7 @@ end
 path = fullfile(fixtureDir, [name '.csv']);
 
 [coeffs, monos] = coefficients(V, x);
-E = monomial_exponents(monos, x);
+E = full(monomial_exponents(monos, x));   % YALMIP returns sparse; ARRAYFUN needs full
 nTerms = numel(coeffs);
 assert(size(E, 1) == nTerms, ...
        'exponent matrix has %d rows but V has %d terms', size(E, 1), nTerms);
@@ -86,15 +86,13 @@ function E = monomial_exponents(monos, x)
 nVars  = numel(x);
 nMonos = numel(monos);
 
-try
-    E = exponents(monos, x);
-    if size(E, 1) == nMonos && size(E, 2) == nVars
-        return;
-    end
-catch
-    % fall through
-end
-
+% Do NOT use YALMIP's EXPONENTS here. It returns columns in YALMIP's own
+% internal variable order, not the caller's order in X, and the two differ.
+% That silently transposes the certificate: the Van der Pol fixture came out as
+% x1^2 - x1*x2 + 1.5*x2^2 when the correct Lyapunov solution (hand-verified via
+% the Kronecker form of A'P + PA = -I) is 1.5*x1^2 - x1*x2 + x2^2 -- the
+% diagonal swapped. Per-variable DEGREE is unambiguous because it names the
+% variable it is asking about.
 E = zeros(nMonos, nVars);
 for i = 1:nMonos
     for j = 1:nVars

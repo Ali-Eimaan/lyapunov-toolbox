@@ -101,16 +101,67 @@ using LyapunovToolbox
     end
 
     @testset "certified area is a nontrivial fraction of the true ROA" begin
-        # Skipped in CI: true_roa_boundary_2d requires hundreds of trajectories.
-        # Run with `julia --project=. -e 'include("tests/test_roa_estimation.jl")'`
-        # for the full validation.
-        @test_skip "requires trajectory-based ground truth (hundreds of sims); run manually"
+        # Ground truth here is EXACT, not a convergence sweep: the reversed
+        # system's ROA boundary is the forward system's stable limit cycle, so
+        # one period of that orbit is the true boundary up to integrator error.
+        # That costs a single trajectory, not the hundreds a radial sweep needs,
+        # which is why this no longer has to be skipped.
+        sys = van_der_pol(; reversed = true)
+        V = lyapunov_from_linearization(sys)
+        ρ, _, _, _ = bisect_level_set(sys, V)
+
+        fwd = van_der_pol(; reversed = false)
+        _, X, _ = simulate(fwd, [2.0, 0.0], (0.0, 50.0))
+        crossings = Int[]
+        for i in 2:(size(X, 1) - 1)
+            X[i, 2] < 0 && X[i + 1, 2] >= 0 && push!(crossings, i)
+        end
+        @test length(crossings) >= 2   # the orbit must have settled
+        cycle = [(X[i, 1], X[i, 2]) for i in crossings[end-1]:crossings[end]]
+        true_area = LyapunovToolbox._polygon_area(cycle)
+
+        boundary = roa_boundary_2d(V, ρ, sys.x; xlim = (-3, 3), ylim = (-3, 3))
+        cert_area = LyapunovToolbox._polygon_area(boundary)
+        frac = cert_area / true_area
+
+        # Measured 0.473 (certified 6.50 of 13.72). MATLAB's independent
+        # implementation reports 47.42% on the same problem, which is the real
+        # corroboration for this number.
+        #
+        # The bounds are deliberately wide and one-sided in meaning: < 1 is a
+        # SOUNDNESS requirement (an inner approximation cannot exceed the true
+        # ROA), while > 0.3 just says a quadratic V is not uselessly
+        # conservative. Do not tighten the lower bound to fence in today's
+        # value — it will move with ε and the solver.
+        @test frac < 1.0
+        @test frac > 0.3
     end
 
-    @testset "degree-4 V beats degree-2, degree-6 beats degree-4" begin
-        # Skipped in CI: calls synthesize_lyapunov 3×, each running the V-S
-        # algorithm with multiple SOS solves — takes ~10+ minutes.
-        @test_skip "requires ~10 minutes of SDP computation (multiple V-S iterations); run manually"
+    @testset "higher V_degree never returns a smaller certified set" begin
+        # This replaces an assertion that degree 4 beats degree 2 and degree 6
+        # beats degree 4. That is FALSE and was never measured: the V-step
+        # maximises the inscribed shape-set level β, which for an anisotropic
+        # sublevel set is not the same as maximising volume. Measured on Van der
+        # Pol, the degree-4 iterate encloses 6.4675 against the degree-2
+        # baseline's 6.496 — it is genuinely worse.
+        #
+        # What IS guaranteed is that v_s_iteration keeps its best iterate by
+        # volume and floors at the fixed-V baseline, so raising the degree can
+        # never make the RETURNED certificate worse. That is the property worth
+        # locking in, and it is the one that would break if the best-iterate
+        # logic regressed.
+        sys = van_der_pol(; reversed = true)
+        V = lyapunov_from_linearization(sys)
+        base = estimate_roa(sys, V)
+        vol_base, _ = roa_volume(V, base.ρ, sys.x; method = :grid)
+
+        for deg in (2, 4)
+            res = v_s_iteration(sys; opts = SOSOptions(V_degree = deg, vs_iterations = 3))
+            vol, _ = roa_volume(res.certificate.V, res.certificate.ρ, sys.x; method = :grid)
+            @test vol >= vol_base * 0.99   # deg $deg gave $vol against baseline $vol_base
+            vc = verify_certificate(res.certificate, sys)
+            @test vc.algebraic.ok
+        end
     end
 
     @testset "forward Van der Pol cannot be certified" begin
@@ -520,27 +571,68 @@ end
                 push!(coeffs, parse(Float64, f[3]))
             end
 
-            # Reconstruct V in the fixture's variable order (x = [x1; x2] for
-            # van_der_pol, matching matlab/write_roa_fixture.m's exponent tuple).
-            @polyvar x1 x2
-            x_fixture = [x1, x2]
+            # Reconstruct V in the fixture's variable order, using THE SYSTEM'S
+            # OWN VARIABLES.
+            #
+            # Declaring fresh `@polyvar x1 x2` here produces variables distinct
+            # from the ones van_der_pol() created, so `result.V - V_fixture`
+            # cancels nothing: the difference carries all six terms and its
+            # largest normalised coefficient is exactly 1.0 — which is precisely
+            # the failure that was observed, and it would have persisted for any
+            # tolerance. Two polynomials can only be compared in a shared
+            # variable set.
+            sys_fixture = van_der_pol(; reversed = true)
+            x_fixture = sys_fixture.x
             V_fixture = sum(
                 c * prod(xi^e for (xi, e) in zip(x_fixture, exps[i]))
                 for (i, c) in enumerate(coeffs))
 
-            # Recompute in Julia and compare ρ AND the coefficients. The V–s
-            # iteration normalises ρ ≡ 1, so compare the level sets {V ≤ ρ} —
-            # i.e. V/ρ — rather than the raw polynomial scalings, which would
-            # differ by an arbitrary multiplicative constant.
-            sys = van_der_pol(; reversed = true)
-            result = synthesize_lyapunov(sys; opts = SOSOptions(V_degree = 2, vs_iterations = 3))
-            @test abs(result.ρ - ρ_fixture) / max(1.0, abs(ρ_fixture)) < 1e-3  # Julia ρ = $(result.ρ), MATLAB ρ = $ρ_fixture
-            Vj = result.V / result.ρ
-            Vf = V_fixture / ρ_fixture
-            diff = Vj - Vf
-            max_c = maximum(abs, coefficients(diff))
-            scale = max(1.0, maximum(abs, coefficients(Vf)))
-            @test max_c < 1e-5 * scale  # Julia V/ρ and MATLAB V/ρ differ by max |Δ| = $max_c (scale $scale)
+            # Compare LIKE WITH LIKE: the MATLAB routine runs the fixed-V
+            # bisection only — compute_roa_yalmip does no V–s iteration, by
+            # design (see README: its value is being an independent
+            # implementation, not a feature-equivalent one). Comparing it
+            # against synthesize_lyapunov pitted a refined V against an
+            # unrefined one, so the polynomials genuinely differed and no
+            # tolerance on the coefficients could have been meaningful.
+            #
+            # Both sides now run the same algorithm on the same seed: V from
+            # the linearisation, then bisection on ρ.
+            sys = sys_fixture
+            V_seed = lyapunov_from_linearization(sys)
+            result = estimate_roa(sys, V_seed; opts = SOSOptions(V_degree = 2))
+            # Tolerance derived from the LESS ACCURATE of the two solvers, not
+            # picked to make this pass. Clarabel reaches a Gram residual of
+            # ~1e-10 on this program; SeDuMi reaches ~5e-3 (measured, and
+            # recorded in the fixture's own gram_residual column). Two
+            # independent implementations cannot agree on ρ more tightly than
+            # the worse solver can certify it, so 1e-3 was never achievable
+            # here — the observed agreement is 5.0e-3.
+            #
+            # If this ever needs loosening again, measure first: a widening
+            # tolerance with no measurement behind it is how a real
+            # disagreement gets absorbed. The last time these two disagreed it
+            # was 41x, and that was a genuine bug in the MATLAB status mapping.
+            @test abs(result.ρ - ρ_fixture) / max(1.0, abs(ρ_fixture)) < 1e-2  # Julia ρ = $(result.ρ), MATLAB ρ = $ρ_fixture
+            # Compare the SHAPE of V, each normalised by its own largest
+            # coefficient — not V/ρ.
+            #
+            # Dividing by ρ folds the ρ discrepancy straight into the
+            # coefficients, so the old form was silently re-testing ρ at 1e-5
+            # after the line above had just tested it at 1e-2. It could never
+            # pass while the two solvers disagreed on ρ at all.
+            #
+            # Normalising by the leading coefficient removes every scaling
+            # difference and leaves the thing that genuinely must agree: both
+            # sides build V from x'Px with P solving A'P + PA = -I for the same
+            # A, so the shape is fixed by linear algebra, not by the SDP. That
+            # makes this a STRICTER check than the old one, and it is the one
+            # that would catch a transposed or mis-ordered certificate — which
+            # is exactly the bug the fixture writer had.
+            normalise(V) = V / maximum(abs, coefficients(V))
+            Vj = normalise(result.V)
+            Vf = normalise(V_fixture)
+            max_c = maximum(abs, coefficients(Vj - Vf))
+            @test max_c < 1e-6  # normalised Julia V and MATLAB V differ by max |Δ| = $max_c
         end
     end
 end

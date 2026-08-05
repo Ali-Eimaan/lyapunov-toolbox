@@ -199,7 +199,8 @@ function is_sos(p, x::AbstractVector; solver = nothing, ε::Real = 0.0)
            st == MOI.DUAL_INFEASIBLE || st == MOI.ALMOST_INFEASIBLE ||
            st == MOI.NUMERICAL_ERROR
         return false
-    elseif st == MOI.ALMOST_OPTIMAL || st == MOI.SLOW_PROGRESS
+    elseif st == MOI.ALMOST_OPTIMAL || st == MOI.SLOW_PROGRESS ||
+           st == MOI.ITERATION_LIMIT || st == MOI.TIME_LIMIT
         # Accept only if the returned Gram matrix is genuinely a certificate:
         # it must reproduce p (residual) and be positive semidefinite.
         ok, _ = _gram_certificate_ok(p - ε * sum(x .^ 2)^d, cref)
@@ -257,7 +258,8 @@ function sos_decomposition(p, x::AbstractVector; solver = nothing)
     if st == MOI.OPTIMAL
         gm = gram_matrix(cref)
         return _project_psd_and_report(p, gm.basis.monomials, Matrix(gm.Q))
-    elseif st == MOI.ALMOST_OPTIMAL || st == MOI.SLOW_PROGRESS
+    elseif st == MOI.ALMOST_OPTIMAL || st == MOI.SLOW_PROGRESS ||
+           st == MOI.ITERATION_LIMIT || st == MOI.TIME_LIMIT
         # Accept only if the returned Gram matrix is genuinely a certificate.
         ok, _ = _gram_certificate_ok(p, cref)
         if ok
@@ -525,7 +527,7 @@ Feasibility mapping, and it must be exactly this:
 | `termination_status` | result |
 |---|---|
 | `OPTIMAL` | feasible |
-| `ALMOST_OPTIMAL` / `SLOW_PROGRESS` | feasible **only if** the returned Gram matrices pass [`gram_residual`](@ref) and a minimum-eigenvalue check |
+| `ALMOST_OPTIMAL` / `SLOW_PROGRESS` / `ITERATION_LIMIT` / `TIME_LIMIT` | feasible **only if** the returned Gram matrices pass [`gram_residual`](@ref) and a minimum-eigenvalue check |
 | `INFEASIBLE`, `DUAL_INFEASIBLE`, `INFEASIBLE_OR_UNBOUNDED` | infeasible |
 | anything else | throw |
 
@@ -604,7 +606,8 @@ function verify_sublevel_set(sys::PolynomialSystem, V, ρ::Real; opts::SOSOption
     st = termination_status(model)
     if st == MOI.OPTIMAL
         feasible = true
-    elseif st == MOI.ALMOST_OPTIMAL || st == MOI.SLOW_PROGRESS
+    elseif st == MOI.ALMOST_OPTIMAL || st == MOI.SLOW_PROGRESS ||
+           st == MOI.ITERATION_LIMIT || st == MOI.TIME_LIMIT
         # Accept only if every Gram matrix the solver returned is genuinely a
         # certificate: it must reproduce its target polynomial and be PSD.
         feasible = _witness_grams_ok(sys, V, Vd, ρ, margin, opts, cref, λ, σ, μ, μb)
@@ -812,7 +815,8 @@ function v_step(sys::PolynomialSystem, λ, shape, β::Real;
 
     if st == MOI.OPTIMAL
         feasible = true
-    elseif st == MOI.ALMOST_OPTIMAL || st == MOI.SLOW_PROGRESS
+    elseif st == MOI.ALMOST_OPTIMAL || st == MOI.SLOW_PROGRESS ||
+           st == MOI.ITERATION_LIMIT || st == MOI.TIME_LIMIT
         # Build V_new early so we can form the target polynomials for the
         # gram_residual check (R1-29).
         V_tentative = _build_V_from_solution(vcoeffs, Vb, x)
@@ -1009,7 +1013,8 @@ function _beta_oracle(sys::PolynomialSystem, V, shape, opts::SOSOptions)
         st = termination_status(model)
         if st == MOI.OPTIMAL
             return true
-        elseif st == MOI.ALMOST_OPTIMAL || st == MOI.SLOW_PROGRESS
+        elseif st == MOI.ALMOST_OPTIMAL || st == MOI.SLOW_PROGRESS ||
+           st == MOI.ITERATION_LIMIT || st == MOI.TIME_LIMIT
             gm = gram_matrix(cref)
             Q = Matrix(gm.Q)
             ok = minimum(eigvals(Symmetric(Q))) > -1e-8
