@@ -61,14 +61,16 @@ function main()
     println("  ✓ Jacobian in disagreement coords is Hurwitz")
 
     # -------------------------------------------------------- 3. certify
+    # The cubic protocol is globally stabilising, so the bisection will never
+    # find an infeasible ρ.  Pass an explicit ρ_hi cap.
     opts2 = SOSOptions(; V_degree = 2)
-    cert2 = synthesize_lyapunov(sys; opts=opts2)
+    cert2 = synthesize_lyapunov(sys; opts=opts2, ρ_hi=100.0)
     vol2 = roa_volume(cert2.V, cert2.ρ, sys.x; method = :montecarlo, n_samples = 20000)
     @printf("Quadratic V: ρ = %.4f, vol ≈ %.4f, time = %.2fs\n",
             cert2.ρ, vol2[1], cert2.solve_time)
 
     opts4 = SOSOptions(; V_degree = 4)
-    cert4 = synthesize_lyapunov(sys; opts=opts4)
+    cert4 = synthesize_lyapunov(sys; opts=opts4, ρ_hi=100.0)
     vol4 = roa_volume(cert4.V, cert4.ρ, sys.x; method = :montecarlo, n_samples = 20000)
     @printf("Quartic V:   ρ = %.4f, vol ≈ %.4f, time = %.2fs\n",
             cert4.ρ, vol4[1], cert4.solve_time)
@@ -88,7 +90,7 @@ function main()
                 @printf("| %4.1f |    —    |    —    | non-Hurwitz |\n", κ)
                 continue
             end
-            cert_κ = synthesize_lyapunov(sys_κ; opts=SOSOptions(; V_degree = 2))
+            cert_κ = synthesize_lyapunov(sys_κ; opts=SOSOptions(; V_degree = 2), ρ_hi=100.0)
             vol_κ = roa_volume(cert_κ.V, cert_κ.ρ, sys_κ.x;
                                method = :montecarlo, n_samples = 10000)
             @printf("| %4.1f | %7.4f | %7.4f |    ok    |\n", κ, cert_κ.ρ, vol_κ[1])
@@ -153,7 +155,7 @@ function main()
     # For simplicity, create mode 2 by modifying Laplacian
     # Actually, we need separate systems. Just certify the path one.
     @printf("Certifying mode 1...\n")
-    cert_m1 = synthesize_lyapunov(sys; opts=SOSOptions(; V_degree = 2))
+    cert_m1 = synthesize_lyapunov(sys; opts=SOSOptions(; V_degree = 2), ρ_hi=100.0)
     @printf("Mode 1: ρ = %.4f\n", cert_m1.ρ)
 
     # For the switching simulation, we simulate in x-coords with piecewise dynamics
