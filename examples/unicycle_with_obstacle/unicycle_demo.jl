@@ -57,19 +57,7 @@ function main()
     @assert cert_con.ρ >= cert_unc.ρ - 1e-8 "Constrained ρ should be ≥ unconstrained"
     @printf("  Ratio: %.2f\n", cert_con.ρ / max(cert_unc.ρ, 1e-12))
 
-    # ------------------------------------------------- 3. free vs. SOS invariant
-    # The invariant s² + c² - 1 = 0 can use free-sign or SOS multiplier.
-    # By default the system notes contain the invariant polynomial.
-    # We already used it implicitly; the free-sign is the default multiplier type.
-    # Run with SOS multiplier for comparison
-    opts_sos_inv = SOSOptions(; V_degree = 4,
-                              invariant_multiplier = :sos)
-    cert_sos_inv = synthesize_lyapunov(sys; opts=opts_sos_inv)
-    @printf("Invariant μ=SOS:   ρ = %.4f\n", cert_sos_inv.ρ)
-    # Free-sign should be ≥ SOS
-    @printf("  Free-sign ρ / SOS ρ = %.3f\n", cert_con.ρ / max(cert_sos_inv.ρ, 1e-12))
-
-    # ----------------------------------------------------- 4. obstacle-free check
+    # ------------------------------------------------- 3. obstacle-free check
     n_samples = 50_000
     rng = MersenneTwister(42)
     clearance = Inf
@@ -97,7 +85,7 @@ function main()
             count_on_manifold, min_g)
     @assert min_g >= -1e-8 "Obstacle constraint violated inside certified set!"
 
-    # -------------------------------------------------------- 5. shape-set sweep
+    # -------------------------------------------------------- 4. shape-set sweep
     # p(x) small → inside certified set.  Sample interior points to estimate the
     # largest β such that {p(x) ≤ β} ⊆ {V(x) ≤ ρ}.  Conservative: use 5th
     # percentile of p among interior samples.
@@ -132,7 +120,7 @@ function main()
     vol_aniso = roa_volume(V, ρ, sys.x; method = :montecarlo, samples = 20000)
     @printf("Anisotropic shape: β = %.4f, vol ≈ %.4f\n", β_aniso, vol_aniso[1])
 
-    # ---------------------------------------------------------- 6. trajectories
+    # ---------------------------------------------------------- 5. trajectories
     n_traj = 20
     all_ok = true
     rng2 = MersenneTwister(7)
@@ -164,7 +152,7 @@ function main()
     end
     @assert all_ok "Simulation cross-check failed"
 
-    # ------------------------------------------------------- 7. verify + export
+    # ------------------------------------------------------- 6. verify + export
     vc = verify_certificate(cert_con, sys)
     ok = vc.algebraic.ok && vc.sampling.ok && vc.dynamical.ok
     worst = vc.sampling.details.worst_Vdot
