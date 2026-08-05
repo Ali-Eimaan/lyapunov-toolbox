@@ -25,35 +25,52 @@ function main()
     # ------------------------------------------------------- 1. two formulations
     sys_taylor = inverted_pendulum(recast = :taylor, taylor_order = 3)
     sys_trig   = inverted_pendulum(recast = :trig)
+    nt = length(sys_taylor.x)
+    ng = length(sys_trig.x)
     @printf("Taylor system: %d states, Gram dim @ deg 4 = %d\n",
-            sys_taylor.n, gram_dimension(sys_taylor.n, 4))
+            nt, gram_dimension(nt, 4))
     @printf("Trig system:   %d states, Gram dim @ deg 4 = %d\n",
-            sys_trig.n, gram_dimension(sys_trig.n, 4))
+            ng, gram_dimension(ng, 4))
 
     # ------------------------------------------------------- 2. certify each one
     opts = SOSOptions(; V_degree = 4)
-    cert_taylor = synthesize_lyapunov(sys_taylor, opts)
-    cert_trig   = synthesize_lyapunov(sys_trig, opts)
-    @printf("Taylor: ρ = %.4f, #SDPs = %d, time = %.2fs\n",
-            cert_taylor.ρ, cert_taylor.iters, cert_taylor.solve_time)
-    @printf("Trig:   ρ = %.4f, #SDPs = %d, time = %.2fs\n",
-            cert_trig.ρ, cert_trig.iters, cert_trig.solve_time)
+    cert_taylor = synthesize_lyapunov(sys_taylor; opts=opts)
+    cert_trig   = synthesize_lyapunov(sys_trig; opts=opts)
+    @printf("Taylor: ρ = %.4f, time = %.2fs\n",
+            cert_taylor.ρ, cert_taylor.solve_time)
+    @printf("Trig:   ρ = %.4f, time = %.2fs\n",
+            cert_trig.ρ, cert_trig.solve_time)
 
     # ------------------------------------------ 3. map both back to (θ,θ̇) and compare
     # Taylor: direct (θ, θ̇)
-    bnd_taylor = roa_boundary_2d(cert_taylor, 400)
-    area_taylor = _polygon_area(bnd_taylor)
+    bnd_taylor = roa_boundary_2d(cert_taylor.V, cert_taylor.ρ, cert_taylor.x;
+                                 xlim=nothing, ylim=nothing, n=400)
+    bnd_taylor_m = hcat(first.(bnd_taylor), last.(bnd_taylor))
+    area_taylor = _polygon_area(bnd_taylor_m)
 
-    # Trig: project from (s, c, θ̇) to (θ, θ̇) along s²+c²=1
-    bnd_trig_4d = roa_boundary_2d(cert_trig, 400; slice_dims = [1, 3], slice_vals = [0.0, 1.0])
-    # The trig certificate has states (s, c, θ̇) — project s=sinθ, c=cosθ → θ
-    bnd_trig = zeros(size(bnd_trig_4d, 1), 2)
-    for i in 1:size(bnd_trig_4d, 1)
-        s, thd = bnd_trig_4d[i, 1], bnd_trig_4d[i, 2]
-        th = atan(s, sqrt(max(0, 1 - s^2)))
-        bnd_trig[i, :] = [th, thd]
+    # Trig: march in physical (θ, θ̇), evaluate V_trig at (sinθ, cosθ, θ̇)
+    V_trig = cert_trig.V
+    ρ_trig = cert_trig.ρ
+    x_trig = cert_trig.x
+    bnd_trig_phys = Tuple{Float64,Float64}[]
+    angles = range(0, 2π; length=401)[1:400]
+    for φ in angles
+        d = [cos(φ), sin(φ)]
+        r_lo, r_hi = 0.0, 100.0
+        for _ in 1:60
+            mid = (r_lo + r_hi) / 2
+            th = mid * d[1]
+            thd = mid * d[2]
+            pt_trig = [sin(th), cos(th), thd]
+            if convert(Float64, V_trig(x_trig => pt_trig)) <= ρ_trig
+                r_lo = mid
+            else
+                r_hi = mid
+            end
+        end
+        push!(bnd_trig_phys, (r_lo * d[1], r_lo * d[2]))
     end
-    area_trig = _polygon_area(bnd_trig)
+    area_trig = _polygon_area(hcat(first.(bnd_trig_phys), last.(bnd_trig_phys)))
     @printf("Projected areas — Taylor: %.4f, Trig: %.4f, ratio: %.2f%%\n",
             area_taylor, area_trig, area_taylor / area_trig * 100)
 
@@ -144,9 +161,10 @@ function main()
     println("|-------|--------|--------|-----------|---------------|----------|")
     for order in [3, 5, 7]
         sys_o = inverted_pendulum(recast = :taylor, taylor_order = order)
-        cert_o = synthesize_lyapunov(sys_o, SOSOptions(; V_degree = 4))
-        bnd_o = roa_boundary_2d(cert_o, 400)
-        area_o = _polygon_area(bnd_o)
+        cert_o = synthesize_lyapunov(sys_o; opts=SOSOptions(; V_degree = 4))
+        bnd_o = roa_boundary_2d(cert_o.V, cert_o.ρ, cert_o.x;
+                                xlim=nothing, ylim=nothing, n=400)
+        area_o = _polygon_area(hcat(first.(bnd_o), last.(bnd_o)))
         # Cross-check
         conv = 0; max_th = 0.0; min_fail = Inf
         rng_o = MersenneTwister(1)
@@ -171,15 +189,19 @@ function main()
     end
 
     # ------------------------------------------------------- 7. verify + export
-    ok_t, w_t = verify_certificate(sys_taylor, cert_taylor)
-    ok_g, w_g = verify_certificate(sys_trig, cert_trig)
+    vc_t = verify_certificate(cert_taylor, sys_taylor)
+    vc_g = verify_certificate(cert_trig, sys_trig)
+    ok_t = vc_t.algebraic.ok && vc_t.sampling.ok && vc_t.dynamical.ok
+    ok_g = vc_g.algebraic.ok && vc_g.sampling.ok && vc_g.dynamical.ok
+    w_t = vc_t.sampling.details.worst_Vdot
+    w_g = vc_g.sampling.details.worst_Vdot
     @assert ok_t && ok_g "Verification failed"
     @printf("Verify — Taylor: worst V̇ = %.3e, Trig: worst V̇ = %.3e\n", w_t, w_g)
 
     datadir = joinpath(dirname(dirname(@__DIR__)), "docs", "figures", "data")
     mkpath(datadir)
     open(joinpath(datadir, "inverted_pendulum.csv"), "w") do io
-        writedlm(io, bnd_taylor, ',')
+        writedlm(io, bnd_taylor_m, ',')
     end
     println("  Data written to docs/figures/data/inverted_pendulum.csv")
     return 0

@@ -41,15 +41,15 @@ function main()
     # ------------------------------------------- 2. unconstrained vs. constrained
     # Unconstrained: ignore obstacle
     opts_unc = SOSOptions(; V_degree = 4)
-    cert_unc = synthesize_lyapunov(sys, opts_unc)
-    @printf("Unconstrained:     ρ = %.4f, #SDPs = %d, time = %.2fs\n",
-            cert_unc.ρ, cert_unc.iters, cert_unc.solve_time)
+    cert_unc = synthesize_lyapunov(sys; opts=opts_unc)
+    @printf("Unconstrained:     ρ = %.4f, time = %.2fs\n",
+            cert_unc.ρ, cert_unc.solve_time)
 
     # Constrained: with obstacle as Putinar constraint
     opts_con = SOSOptions(; V_degree = 4)
-    cert_con = synthesize_lyapunov(sys, opts_con)
-    @printf("Constrained:       ρ = %.4f, #SDPs = %d, time = %.2fs\n",
-            cert_con.ρ, cert_con.iters, cert_con.solve_time)
+    cert_con = synthesize_lyapunov(sys; opts=opts_con)
+    @printf("Constrained:       ρ = %.4f, time = %.2fs\n",
+            cert_con.ρ, cert_con.solve_time)
     @assert cert_con.ρ >= cert_unc.ρ - 1e-8 "Constrained ρ should be ≥ unconstrained"
     @printf("  Ratio: %.2f\n", cert_con.ρ / max(cert_unc.ρ, 1e-12))
 
@@ -60,7 +60,7 @@ function main()
     # Run with SOS multiplier for comparison
     opts_sos_inv = SOSOptions(; V_degree = 4,
                               invariant_multiplier = :sos)
-    cert_sos_inv = synthesize_lyapunov(sys, opts_sos_inv)
+    cert_sos_inv = synthesize_lyapunov(sys; opts=opts_sos_inv)
     @printf("Invariant μ=SOS:   ρ = %.4f\n", cert_sos_inv.ρ)
     # Free-sign should be ≥ SOS
     @printf("  Free-sign ρ / SOS ρ = %.3f\n", cert_con.ρ / max(cert_sos_inv.ρ, 1e-12))
@@ -141,7 +141,9 @@ function main()
     @assert all_ok "Simulation cross-check failed"
 
     # ------------------------------------------------------- 7. verify + export
-    ok, worst = verify_certificate(sys, cert_con)
+    vc = verify_certificate(cert_con, sys)
+    ok = vc.algebraic.ok && vc.sampling.ok && vc.dynamical.ok
+    worst = vc.sampling.details.worst_Vdot
     @assert ok "Certificate verification failed"
     @printf("Verification: ✓  worst V̇ = %.3e\n", worst)
 

@@ -62,16 +62,16 @@ function main()
 
     # -------------------------------------------------------- 3. certify
     opts2 = SOSOptions(; V_degree = 2)
-    cert2 = synthesize_lyapunov(sys, opts2)
+    cert2 = synthesize_lyapunov(sys; opts=opts2)
     vol2 = roa_volume(cert2.V, cert2.ρ, sys.x; method = :montecarlo, n_samples = 20000)
-    @printf("Quadratic V: ρ = %.4f, vol ≈ %.4f, #SDPs = %d, time = %.2fs\n",
-            cert2.ρ, vol2[1], cert2.iters, cert2.solve_time)
+    @printf("Quadratic V: ρ = %.4f, vol ≈ %.4f, time = %.2fs\n",
+            cert2.ρ, vol2[1], cert2.solve_time)
 
     opts4 = SOSOptions(; V_degree = 4)
-    cert4 = synthesize_lyapunov(sys, opts4)
+    cert4 = synthesize_lyapunov(sys; opts=opts4)
     vol4 = roa_volume(cert4.V, cert4.ρ, sys.x; method = :montecarlo, n_samples = 20000)
-    @printf("Quartic V:   ρ = %.4f, vol ≈ %.4f, #SDPs = %d, time = %.2fs\n",
-            cert4.ρ, vol4[1], cert4.iters, cert4.solve_time)
+    @printf("Quartic V:   ρ = %.4f, vol ≈ %.4f, time = %.2fs\n",
+            cert4.ρ, vol4[1], cert4.solve_time)
 
     println("  NOTE: bounded certified set reflects limits of the SOS relaxation,")
     println("  not a real ROA boundary — the cubic protocol is globally stabilising.")
@@ -83,12 +83,12 @@ function main()
     for κ in [-0.2, 0.0, 0.5, 1.0, 2.0, 5.0]
         try
             sys_κ = consensus_network(n = 3, coupling = :cubic, κ = κ)
-            Jκ = jacobian_at(sys_κ, zeros(sys_κ.n))
+            Jκ = jacobian_at(sys_κ.f, sys_κ.x, zeros(length(sys_κ.x)))
             if any(real(eigvals(Jκ)) .>= 0)
                 @printf("| %4.1f |    —    |    —    | non-Hurwitz |\n", κ)
                 continue
             end
-            cert_κ = synthesize_lyapunov(sys_κ, SOSOptions(; V_degree = 2))
+            cert_κ = synthesize_lyapunov(sys_κ; opts=SOSOptions(; V_degree = 2))
             vol_κ = roa_volume(cert_κ.V, cert_κ.ρ, sys_κ.x;
                                method = :montecarlo, n_samples = 10000)
             @printf("| %4.1f | %7.4f | %7.4f |    ok    |\n", κ, cert_κ.ρ, vol_κ[1])
@@ -153,7 +153,7 @@ function main()
     # For simplicity, create mode 2 by modifying Laplacian
     # Actually, we need separate systems. Just certify the path one.
     @printf("Certifying mode 1...\n")
-    cert_m1 = synthesize_lyapunov(sys, SOSOptions(; V_degree = 2))
+    cert_m1 = synthesize_lyapunov(sys; opts=SOSOptions(; V_degree = 2))
     @printf("Mode 1: ρ = %.4f\n", cert_m1.ρ)
 
     # For the switching simulation, we simulate in x-coords with piecewise dynamics
@@ -212,8 +212,12 @@ function main()
     println("  This is the negative result that motivates the transition-viable approach.")
 
     # ------------------------------------------------------- 7. verify + export
-    ok2, w2 = verify_certificate(sys, cert2)
-    ok4, w4 = verify_certificate(sys, cert4)
+    vc2 = verify_certificate(cert2, sys)
+    vc4 = verify_certificate(cert4, sys)
+    ok2 = vc2.algebraic.ok && vc2.sampling.ok && vc2.dynamical.ok
+    ok4 = vc4.algebraic.ok && vc4.sampling.ok && vc4.dynamical.ok
+    w2 = vc2.sampling.details.worst_Vdot
+    w4 = vc4.sampling.details.worst_Vdot
     @assert ok2 && ok4 "Verification failed"
     @printf("Verification: quad V̇ = %.3e, quart V̇ = %.3e\n", w2, w4)
 
