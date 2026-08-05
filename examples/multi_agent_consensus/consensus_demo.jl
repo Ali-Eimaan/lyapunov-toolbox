@@ -118,6 +118,7 @@ function main()
     rng2 = MersenneTwister(3)
     all_converged = true
     for i in 1:n_sim
+        local z0
         while true
             z0 = [(rand(rng2)-0.5) * cert4.ρ^0.5 for _ in 1:(n-1)]
             if cert4.V(z0) <= cert4.ρ * 0.8
