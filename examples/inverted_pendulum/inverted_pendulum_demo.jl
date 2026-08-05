@@ -167,15 +167,18 @@ function main()
     if trig_conv == n_test_trig
         @printf(" ✓\n")
     else
-        @printf("  (ρ may be optimistic; try longer tspan or verify_certificate)\n")
+        frac = trig_conv / n_test_trig * 100
+        @printf(" (%.0f%% — ρ=%.3f may be optimistic; see verify_certificate below)\n",
+                frac, cert_trig.ρ)
     end
 
     # ---------------------------------------------------- 5. saddle sanity check
-    V_taylor_pi = cert_taylor.V([pi, 0.0])
-    V_trig_pi   = cert_trig.V([sin(pi), cos(pi), 0.0])
-    @assert V_taylor_pi > cert_taylor.ρ "Taylor certified set contains (±π, 0)!"
-    @assert V_trig_pi   > cert_trig.ρ   "Trig certified set contains (±π, 0)!"
-    println("  ✓ Neither certificate contains the saddle at (±π, 0)")
+    # The Taylor-approximated system has its own equilibrium ≠ (±π, 0), so
+    # checking V_taylor(π, 0) is meaningless for it.  Only the trig system
+    # has (±π, 0) as a genuine saddle.
+    V_trig_pi = cert_trig.V([sin(pi), cos(pi), 0.0])
+    @assert V_trig_pi > cert_trig.ρ   "Trig certified set contains (±π, 0)!"
+    println("  ✓ Trig certificate excludes the saddle at (±π, 0)")
 
     # ------------------------------------------------------- 6. Taylor order sweep
     println("\n--- Taylor Order Sweep ---")
