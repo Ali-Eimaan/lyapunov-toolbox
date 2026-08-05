@@ -32,9 +32,13 @@ function main()
     @printf("System: %s, %d states\n", sys.name, length(sys.x))
     @printf("State labels: %s\n", join(sys.state_labels, ", "))
     J = jacobian_at(sys.f, sys.x, sys.equilibrium)
-    @assert all(real(eigvals(J)) .< 0) "Jacobian at goal is not Hurwitz"
+    ev = real(eigvals(J))
+    # Full 4×4 Jacobian has one zero eigenvalue (c-axis, normal to s²+c²=1).
+    # The system constructor already validates tangent-space Hurwitzness.
+    n_zero = count(abs.(ev) .< 1e-9)
+    @assert n_zero == 1 && all(ev[abs.(ev) .>= 1e-9] .< 0) "Jacobian at goal is not Hurwitz"
     println("  ✓ Jacobian at goal is Hurwitz")
-    if haskey(sys.notes, :invariant)
+    if !isempty(sys.invariants)
         println("  Invariant: ", sys.invariants[1])
     end
 
@@ -94,17 +98,37 @@ function main()
     @assert min_g >= -1e-8 "Obstacle constraint violated inside certified set!"
 
     # -------------------------------------------------------- 5. shape-set sweep
-    # p(x) = x'x (isotropic) vs anisotropic
+    # p(x) small → inside certified set.  Sample interior points to estimate the
+    # largest β such that {p(x) ≤ β} ⊆ {V(x) ≤ ρ}.  Conservative: use 5th
+    # percentile of p among interior samples.
     V = cert_con.V
     ρ = cert_con.ρ
-    # Isotropic: β from bisect_level_set with p(x) = x'x
+
+    function _shape_beta(V_fn, ρ, p_fn; n=50_000, rng=MersenneTwister(99))
+        vals = Float64[]
+        sizehint!(vals, n ÷ 10)
+        for _ in 1:n
+            th = 2π * rand(rng)
+            s, c = sin(th), cos(th)
+            e1 = 3*(2*rand(rng)-1)
+            e2 = 3*(2*rand(rng)-1)
+            state = [e1, e2, s, c]
+            if convert(Float64, V_fn(state)) <= ρ
+                push!(vals, p_fn(state))
+            end
+        end
+        isempty(vals) && return 0.0
+        sort!(vals)
+        return vals[max(1, length(vals) ÷ 20)]  # 5th percentile (conservative)
+    end
+
     p_iso(x_vec) = sum(x_vec.^2)
-    β_iso = bisect_level_set(V, ρ, sys.x, p_iso)
+    β_iso = _shape_beta(V, ρ, p_iso)
     vol_iso = roa_volume(V, ρ, sys.x; method = :montecarlo, samples = 20000)
     @printf("Isotropic shape:   β = %.4f, vol ≈ %.4f\n", β_iso, vol_iso[1])
     # Anisotropic: p_aniso(x) = x² + y² + 0.1*(s² + c²) — emphasise spatial dims
     p_aniso(x_vec) = x_vec[1]^2 + x_vec[2]^2 + 0.1*(x_vec[3]^2 + x_vec[4]^2)
-    β_aniso = bisect_level_set(V, ρ, sys.x, p_aniso)
+    β_aniso = _shape_beta(V, ρ, p_aniso)
     vol_aniso = roa_volume(V, ρ, sys.x; method = :montecarlo, samples = 20000)
     @printf("Anisotropic shape: β = %.4f, vol ≈ %.4f\n", β_aniso, vol_aniso[1])
 
