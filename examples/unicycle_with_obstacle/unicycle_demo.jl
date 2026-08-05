@@ -126,6 +126,7 @@ function main()
     rng2 = MersenneTwister(7)
     for i in 1:n_traj
         # Sample interior point on manifold
+        local x0
         while true
             th = 2π * rand(rng2)
             s, c = sin(th), cos(th)
