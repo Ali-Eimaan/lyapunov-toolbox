@@ -65,13 +65,13 @@ function main()
     # find an infeasible ρ.  Pass an explicit ρ_hi cap.
     opts2 = SOSOptions(; V_degree = 2)
     cert2 = synthesize_lyapunov(sys; opts=opts2, ρ_hi=100.0)
-    vol2 = roa_volume(cert2.V, cert2.ρ, sys.x; method = :montecarlo, n_samples = 20000)
+    vol2 = roa_volume(cert2.V, cert2.ρ, sys.x; method = :montecarlo, samples = 20000)
     @printf("Quadratic V: ρ = %.4f, vol ≈ %.4f, time = %.2fs\n",
             cert2.ρ, vol2[1], cert2.solve_time)
 
     opts4 = SOSOptions(; V_degree = 4)
     cert4 = synthesize_lyapunov(sys; opts=opts4, ρ_hi=100.0)
-    vol4 = roa_volume(cert4.V, cert4.ρ, sys.x; method = :montecarlo, n_samples = 20000)
+    vol4 = roa_volume(cert4.V, cert4.ρ, sys.x; method = :montecarlo, samples = 20000)
     @printf("Quartic V:   ρ = %.4f, vol ≈ %.4f, time = %.2fs\n",
             cert4.ρ, vol4[1], cert4.solve_time)
 
@@ -92,7 +92,7 @@ function main()
             end
             cert_κ = synthesize_lyapunov(sys_κ; opts=SOSOptions(; V_degree = 2), ρ_hi=100.0)
             vol_κ = roa_volume(cert_κ.V, cert_κ.ρ, sys_κ.x;
-                               method = :montecarlo, n_samples = 10000)
+                               method = :montecarlo, samples = 10000)
             @printf("| %4.1f | %7.4f | %7.4f |    ok    |\n", κ, cert_κ.ρ, vol_κ[1])
         catch e
             @printf("| %4.1f |    —    |    —    | %s |\n", κ, typeof(e).name.name)

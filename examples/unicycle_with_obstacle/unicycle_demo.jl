@@ -100,12 +100,12 @@ function main()
     # Isotropic: β from bisect_level_set with p(x) = x'x
     p_iso(x_vec) = sum(x_vec.^2)
     β_iso = bisect_level_set(V, ρ, sys.x, p_iso)
-    vol_iso = roa_volume(V, ρ, sys.x; method = :montecarlo, n_samples = 20000)
+    vol_iso = roa_volume(V, ρ, sys.x; method = :montecarlo, samples = 20000)
     @printf("Isotropic shape:   β = %.4f, vol ≈ %.4f\n", β_iso, vol_iso[1])
     # Anisotropic: p_aniso(x) = x² + y² + 0.1*(s² + c²) — emphasise spatial dims
     p_aniso(x_vec) = x_vec[1]^2 + x_vec[2]^2 + 0.1*(x_vec[3]^2 + x_vec[4]^2)
     β_aniso = bisect_level_set(V, ρ, sys.x, p_aniso)
-    vol_aniso = roa_volume(V, ρ, sys.x; method = :montecarlo, n_samples = 20000)
+    vol_aniso = roa_volume(V, ρ, sys.x; method = :montecarlo, samples = 20000)
     @printf("Anisotropic shape: β = %.4f, vol ≈ %.4f\n", β_aniso, vol_aniso[1])
 
     # ---------------------------------------------------------- 6. trajectories
