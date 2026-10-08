@@ -52,8 +52,8 @@ dev = [
 ]
 
 [project.urls]
-Homepage = "https://github.com/Ali-Eiman/lyapunov-toolbox"
-Repository = "https://github.com/Ali-Eiman/lyapunov-toolbox"
+Homepage = "https://github.com/Ali-Eimaan/lyapunov-toolbox"
+Repository = "https://github.com/Ali-Eimaan/lyapunov-toolbox"
 
 [tool.setuptools.packages.find]
 where = ["."]

@@ -3,7 +3,7 @@
 Sum-of-Squares Lyapunov function synthesis and region-of-attraction estimation in
 Julia (SumOfSquares.jl), Python (bridge + plotting), and MATLAB (YALMIP+Mosek).
 
-[![CI](https://github.com/ali-eiman/lyapunov-toolbox/actions/workflows/test.yml/badge.svg)](https://github.com/ali-eiman/lyapunov-toolbox/actions/workflows/test.yml)
+[![CI](https://github.com/Ali-Eimaan/lyapunov-toolbox/actions/workflows/test.yml/badge.svg)](https://github.com/Ali-Eimaan/lyapunov-toolbox/actions/workflows/test.yml)
 [![Julia](https://img.shields.io/badge/julia-%3E%3D1.10-blue)](https://julialang.org)
 [![Licence](https://img.shields.io/badge/licence-BSD--3--Clause-green)](LICENSE)
 
@@ -92,7 +92,7 @@ cross-check the repository has.
 ## Install
 
 ```bash
-git clone https://github.com/ali-eiman/lyapunov-toolbox.git
+git clone https://github.com/Ali-Eimaan/lyapunov-toolbox.git
 cd lyapunov-toolbox
 ```
 
@@ -237,7 +237,7 @@ This library produces the per-mode inner approximations that compose into
 transition-viable funnels. To cite it in a paper:
 
 > The SOS certificates and sublevel-set estimates were computed with
-> `lyapunov-toolbox` (commit `abcdef`, https://github.com/ali-eiman/lyapunov-toolbox),
+> `lyapunov-toolbox` (commit `abcdef`, https://github.com/Ali-Eimaan/lyapunov-toolbox),
 > which wraps SumOfSquares.jl with Clarabel.
 
 Replace `abcdef` with the commit actually used. Pin the commit rather than the
